@@ -1,0 +1,633 @@
+<html>
+<head>
+    <title>GLiNER2</title>
+    <script>
+        window.gliner2SettingsView = function (context, config) {
+            return {
+                taskSchemaPresets: {
+                    entities: '["person", "organization", "location", "date"]',
+                    classify: '{"sentiment": ["positive", "negative", "neutral"]}',
+                    json: '{"product": ["name", "price", "features"]}',
+                    relations: '["works_for", "located_in", "reports_to"]',
+                },
+                get localInstallLabel() {
+                    return config.gliner2_mode === "local" ? "Install Local Runtime" : "Install API Runtime";
+                },
+                gpuChecks() {
+                    const status = this.status || {};
+                    return [
+                        {
+                            label: "Running inside Docker",
+                            ok: !!status.in_docker,
+                            detail: status.in_docker
+                                ? "Agent Zero is running in a container."
+                                : "This instance does not appear to be running in Docker.",
+                        },
+                        {
+                            label: "PyTorch installed in the container",
+                            ok: !!status.torch_installed,
+                            detail: status.torch_installed
+                                ? `Torch ${status.torch_version || ""}`.trim()
+                                : (status.torch_error || "Torch is not installed in the Agent Zero runtime."),
+                        },
+                        {
+                            label: "CUDA visible inside the container",
+                            ok: !!status.torch_cuda_available,
+                            detail: status.torch_cuda_available
+                                ? `${status.torch_cuda_device_name || "GPU detected"}${status.torch_cuda_device_count ? ` (${status.torch_cuda_device_count} device${status.torch_cuda_device_count === 1 ? "" : "s"})` : ""}`
+                                : "CUDA is not currently available to PyTorch in this container.",
+                        },
+                    ];
+                },
+                hostStepRequired() {
+                    const status = this.status || {};
+                    return !!status.in_docker && !!status.torch_installed && !status.torch_cuda_available;
+                },
+                hostStepMessage() {
+                    const status = this.status || {};
+                    if (!status.in_docker) {
+                        return "GPU enablement guidance here is aimed at Docker-based Agent Zero installs.";
+                    }
+                    if (!status.torch_installed) {
+                        return "Install the local runtime first so the container has GLiNER2 and PyTorch available.";
+                    }
+                    if (!status.torch_cuda_available) {
+                        return "Host step required: recreate the Agent Zero container with GPU passthrough, for example `--gpus all`. The plugin UI cannot grant GPU access to an already-running container.";
+                    }
+                    return "Container GPU access is available. You can now use local mode and optionally enable fp16 quantization or torch.compile.";
+                },
+                status: null,
+                statusLoading: false,
+                installRunning: false,
+                testRunning: false,
+                testTask: "entities",
+                testText: "Ada Lovelace worked with Charles Babbage on the Analytical Engine in London.",
+                testSchemaText: '["person", "organization", "location", "date"]',
+                testResult: "",
+                setTask(task) {
+                    this.testTask = task;
+                    this.testSchemaText = this.taskSchemaPresets[task] || "";
+                },
+                parseSchema() {
+                    const raw = (this.testSchemaText || "").trim();
+                    if (!raw) return null;
+                    try {
+                        return JSON.parse(raw);
+                    } catch (e) {
+                        window.toastFrontendError?.("Schema must be valid JSON.", "GLiNER2");
+                        return null;
+                    }
+                },
+                async refreshStatus(options = {}) {
+                    this.statusLoading = true;
+                    try {
+                        const response = await fetchApi("plugins/gliner2/status", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                project_name: context.projectName || "",
+                                agent_profile: context.agentProfileKey || "",
+                                load_model: !!options.loadModel,
+                            }),
+                        });
+                        this.status = await response.json();
+                    } catch (e) {
+                        this.status = { ok: false, error: e?.message || "Failed to load status." };
+                        window.toastFrontendError?.(this.status.error, "GLiNER2");
+                    } finally {
+                        this.statusLoading = false;
+                    }
+                },
+                async loadModel() {
+                    await this.refreshStatus({ loadModel: true });
+                    if (this.status?.model_loaded) {
+                        window.toastFrontendSuccess?.("Model loaded in the current Agent Zero process.", "GLiNER2");
+                    } else if (this.status?.error) {
+                        window.toastFrontendError?.(this.status.error, "GLiNER2");
+                    } else {
+                        window.toastFrontendWarning?.("Model is still not loaded.", "GLiNER2");
+                    }
+                },
+                async installForCurrentMode() {
+                    this.installRunning = true;
+                    try {
+                        const response = await fetchApi("plugins/gliner2/install", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                mode: config.gliner2_mode,
+                                project_name: context.projectName || "",
+                                agent_profile: context.agentProfileKey || "",
+                            }),
+                        });
+                        const result = await response.json();
+                        if (!result.ok) {
+                            window.toastFrontendError?.(result.stderr || result.error || "Install failed.", "GLiNER2");
+                        } else {
+                            window.toastFrontendSuccess?.("Dependency install finished.", "GLiNER2");
+                        }
+                        await this.refreshStatus();
+                    } catch (e) {
+                        window.toastFrontendError?.(e?.message || "Install failed.", "GLiNER2");
+                    } finally {
+                        this.installRunning = false;
+                    }
+                },
+                async runTestExtraction() {
+                    const schema = this.parseSchema();
+                    if ((this.testSchemaText || "").trim() && schema === null) return;
+                    this.testRunning = true;
+                    this.testResult = "";
+                    try {
+                        const response = await fetchApi("plugins/gliner2/test_extract", {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                task: this.testTask,
+                                text: this.testText,
+                                schema,
+                                project_name: context.projectName || "",
+                                agent_profile: context.agentProfileKey || "",
+                            }),
+                        });
+                        const result = await response.json();
+                        this.testResult = JSON.stringify(result, null, 2);
+                        if (!result.ok) {
+                            window.toastFrontendError?.(result.error || "Extraction failed.", "GLiNER2");
+                        }
+                    } catch (e) {
+                        this.testResult = JSON.stringify(
+                            { ok: false, error: e?.message || "Extraction failed." },
+                            null,
+                            2
+                        );
+                        window.toastFrontendError?.(e?.message || "Extraction failed.", "GLiNER2");
+                    } finally {
+                        this.testRunning = false;
+                    }
+                },
+                async init() {
+                    this.setTask(this.testTask);
+                    await this.refreshStatus();
+                },
+            };
+        };
+    </script>
+</head>
+<body>
+    <div x-data="window.gliner2SettingsView(context, config)" x-init="init()">
+        <template x-if="config">
+            <div class="gliner2-config">
+                <div class="section-title">GLiNER2</div>
+                <div class="section-description">
+                    Schema-driven information extraction for memory keywords, knowledge import enrichment, and direct agent use.
+                </div>
+
+                <div class="gliner2-card">
+                    <div class="section-title">Quick Start</div>
+                    <ol class="gliner2-steps">
+                        <li>Start or recreate the Agent Zero Docker container with GPU access: add <code>--gpus all</code>.</li>
+                        <li>In this plugin, choose <code>local</code> mode, then click <span class="gliner2-inline-label">Install Local Runtime</span>.</li>
+                        <li>Click <span class="gliner2-inline-label">Refresh</span> and confirm <code>torch_cuda_available</code> is <code>true</code>.</li>
+                        <li>If CUDA is still false, install the Linux + Pip + CUDA torch command from <a href="https://docs.pytorch.org/get-started/locally/" target="_blank" rel="noreferrer">PyTorch Start Locally</a> inside the container, then refresh here.</li>
+                    </ol>
+                    <div class="section-description">
+                        Optional: after GPU is visible, turn on <code>fp16 quantization</code> and then <code>torch.compile</code> if you want more speed.
+                    </div>
+                </div>
+
+                <div class="gliner2-card">
+                    <div class="section-title">GPU Readiness</div>
+                    <div class="section-description">
+                        These checks tell you whether the current Agent Zero container can actually use the GPU for local GLiNER inference.
+                    </div>
+                    <div class="gliner2-checklist">
+                        <template x-for="check in gpuChecks()" :key="check.label">
+                            <div class="gliner2-check" :class="check.ok ? 'is-ok' : 'is-missing'">
+                                <div class="gliner2-check-header">
+                                    <span class="gliner2-check-dot" x-text="check.ok ? 'OK' : 'FIX'"></span>
+                                    <span class="gliner2-check-label" x-text="check.label"></span>
+                                </div>
+                                <div class="gliner2-check-detail" x-text="check.detail"></div>
+                            </div>
+                        </template>
+                    </div>
+                    <div class="gliner2-host-note" :class="hostStepRequired() ? 'is-warning' : 'is-ok-note'" x-text="hostStepMessage()"></div>
+                </div>
+
+                <div class="gliner2-card">
+                    <div class="section-title">General</div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Enable GLiNER2 plugin</div>
+                            <div class="field-description">Master switch for GLiNER2 features.</div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_enabled" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Inference mode</div>
+                            <div class="field-description">Use a local model or the hosted API.</div>
+                        </div>
+                        <div class="field-control">
+                            <select x-model="config.gliner2_mode">
+                                <option value="local">local</option>
+                                <option value="api">api</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="field" x-show="config.gliner2_mode === 'local'">
+                        <div class="field-label">
+                            <div class="field-title">Local model name</div>
+                            <div class="field-description">Hugging Face model id used for local inference.</div>
+                        </div>
+                        <div class="field-control">
+                            <input type="text" x-model="config.gliner2_model" />
+                        </div>
+                    </div>
+
+                    <div class="field" x-show="config.gliner2_mode === 'api'">
+                        <div class="field-label">
+                            <div class="field-title">API key environment variable</div>
+                            <div class="field-description">Environment variable that contains the Pioneer API key.</div>
+                        </div>
+                        <div class="field-control">
+                            <input type="text" x-model="config.gliner2_api_key_env" />
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Enable fp16 quantization</div>
+                            <div class="field-description">Only applies to supported CUDA local runs.</div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_quantize" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Enable torch.compile</div>
+                            <div class="field-description">Only applies to supported CUDA local runs.</div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_compile" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gliner2-card">
+                    <div class="section-title">Memory Integration</div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Replace eligible memory utility calls</div>
+                            <div class="field-description">Intercepts memory keyword and recall-query utility-model calls that GLiNER2 can answer with entity extraction.</div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_utility_replacement_enabled" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Fallback to selected Utility model</div>
+                            <div class="field-description">If GLiNER2 is unavailable or finds no entities, allow Agent Zero to continue with the configured Utility model.</div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_fallback_to_utility_model" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Show GLiNER2 usage in run log</div>
+                            <div class="field-description">Adds a util log entry whenever GLiNER2 replaces an eligible Utility-model memory call.</div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_usage_logging" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Use GLiNER2 for memory keyword extraction</div>
+                            <div class="field-description">Returns extracted entities as memory search keywords instead of calling the Utility model.</div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_memory_keyword_extraction" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Recall query enrichment</div>
+                            <div class="field-description">When memory query prep is enabled, builds the recall query from GLiNER2 entities instead of the Utility model.</div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_recall_query_enrichment" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Use GLiNER2 for memory post-filtering</div>
+                            <div class="field-description">Classifies recalled memories and solutions as relevant or irrelevant before they are added to context.</div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_memory_post_filter" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Post-filter confidence threshold</div>
+                            <div class="field-description">Minimum GLiNER2 confidence required to accept a memory relevance classification.</div>
+                        </div>
+                        <div class="field-control">
+                            <input type="number" min="0" max="1" step="0.01" x-model.number="config.gliner2_post_filter_threshold" />
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Use GLiNER2 for consolidation triage</div>
+                            <div class="field-description">Lets GLiNER2 skip or keep memories separate when confident; merge, replace, and update still use the Utility model unless fallback is disabled.</div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_consolidation_triage" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Consolidation triage threshold</div>
+                            <div class="field-description">Minimum GLiNER2 confidence required before bypassing generative consolidation analysis.</div>
+                        </div>
+                        <div class="field-control">
+                            <input type="number" min="0" max="1" step="0.01" x-model.number="config.gliner2_consolidation_triage_threshold" />
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Enrich imported knowledge metadata</div>
+                            <div class="field-description">Adds GLiNER2 entities to document chunk metadata during import.</div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_knowledge_import_enrichment" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Entity confidence threshold</div>
+                            <div class="field-description">Passed through when the underlying GLiNER2 runtime supports thresholding.</div>
+                        </div>
+                        <div class="field-control">
+                            <input type="number" min="0" max="1" step="0.01" x-model.number="config.gliner2_entity_threshold" />
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gliner2-card">
+                    <div class="section-title">Tool</div>
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Expose gliner2_extract tool</div>
+                            <div class="field-description">Allows the agent to call GLiNER2 directly for extraction tasks.</div>
+                        </div>
+                        <div class="field-control">
+                            <label class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_tool_enabled" />
+                                <span class="toggler"></span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="gliner2-card">
+                    <div class="section-title">Diagnostics</div>
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Runtime status</div>
+                            <div class="field-description">Current package, mode, and model state.</div>
+                        </div>
+                        <div class="field-control gliner2-status-actions">
+                            <button class="btn btn-field" @click="refreshStatus()" :disabled="statusLoading">
+                                Refresh
+                            </button>
+                            <button class="btn btn-field" @click="loadModel()" :disabled="statusLoading">
+                                Load Model
+                            </button>
+                            <button class="btn" @click="installForCurrentMode()" :disabled="installRunning">
+                                <span x-text="localInstallLabel"></span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <pre class="gliner2-status-block" x-text="statusLoading ? 'Loading status...' : JSON.stringify(status || {}, null, 2)"></pre>
+                </div>
+
+                <div class="gliner2-card">
+                    <div class="section-title">Sample Extraction</div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Task</div>
+                        </div>
+                        <div class="field-control">
+                            <select x-model="testTask" @change="setTask($event.target.value)">
+                                <option value="entities">entities</option>
+                                <option value="classify">classify</option>
+                                <option value="json">json</option>
+                                <option value="relations">relations</option>
+                            </select>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Text</div>
+                        </div>
+                        <div class="field-control">
+                            <textarea x-model="testText" rows="4"></textarea>
+                        </div>
+                    </div>
+
+                    <div class="field">
+                        <div class="field-label">
+                            <div class="field-title">Schema JSON</div>
+                            <div class="field-description">Examples: `["person","organization"]` or `{"sentiment":["positive","negative"]}`.</div>
+                        </div>
+                        <div class="field-control">
+                            <textarea x-model="testSchemaText" rows="4"></textarea>
+                        </div>
+                    </div>
+
+                    <div class="gliner2-status-actions">
+                        <button class="btn btn-field" @click="runTestExtraction()" :disabled="testRunning">
+                            Run Extraction
+                        </button>
+                    </div>
+
+                    <pre class="gliner2-status-block" x-text="testRunning ? 'Running extraction...' : (testResult || 'No extraction run yet.')"></pre>
+                </div>
+            </div>
+        </template>
+    </div>
+
+    <style>
+        .gliner2-config {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .gliner2-card {
+            border: 1px solid var(--color-border);
+            border-radius: 8px;
+            padding: 16px;
+        }
+
+        .gliner2-status-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .gliner2-checklist {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .gliner2-check {
+            border: 1px solid var(--color-border);
+            border-radius: 8px;
+            padding: 10px 12px;
+        }
+
+        .gliner2-check.is-ok {
+            background: color-mix(in srgb, var(--color-success, #2e7d32) 6%, transparent);
+        }
+
+        .gliner2-check.is-missing {
+            background: color-mix(in srgb, var(--color-warning, #b26a00) 8%, transparent);
+        }
+
+        .gliner2-check-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 4px;
+        }
+
+        .gliner2-check-dot {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-width: 34px;
+            height: 22px;
+            border-radius: 999px;
+            font-size: 0.72rem;
+            font-weight: 700;
+            background: rgba(0, 0, 0, 0.12);
+        }
+
+        .gliner2-check-label {
+            font-weight: 600;
+        }
+
+        .gliner2-check-detail {
+            color: var(--color-text-secondary);
+            line-height: 1.45;
+        }
+
+        .gliner2-steps {
+            margin: 0 0 10px 1.15rem;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+
+        .gliner2-steps li {
+            line-height: 1.45;
+        }
+
+        .gliner2-inline-label {
+            font-weight: 600;
+        }
+
+        .gliner2-host-note {
+            margin-top: 12px;
+            padding: 10px 12px;
+            border-radius: 8px;
+            line-height: 1.45;
+        }
+
+        .gliner2-host-note.is-warning {
+            background: color-mix(in srgb, var(--color-warning, #b26a00) 10%, transparent);
+        }
+
+        .gliner2-host-note.is-ok-note {
+            background: color-mix(in srgb, var(--color-success, #2e7d32) 8%, transparent);
+        }
+
+        .gliner2-status-block {
+            margin: 0;
+            padding: 12px;
+            border-radius: 8px;
+            background: var(--color-bg-soft, rgba(0, 0, 0, 0.04));
+            overflow: auto;
+            white-space: pre-wrap;
+            word-break: break-word;
+        }
+
+        textarea {
+            width: 100%;
+            min-height: 96px;
+        }
+    </style>
+</body>
+</html>

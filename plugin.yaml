@@ -1,0 +1,9 @@
+name: gliner2
+title: GLiNER2
+description: Local and API-backed schema-driven information extraction for Agent Zero.
+version: 1.0.0
+settings_sections:
+  - agent
+per_project_config: true
+per_agent_config: true
+always_enabled: false
