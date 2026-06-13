@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import os
 import threading
+import time
 from copy import deepcopy
 from typing import Any
 
@@ -28,6 +29,14 @@ def _config_key(config: dict[str, Any]) -> tuple[Any, ...]:
         bool(config.get("gliner2_quantize", False)),
         bool(config.get("gliner2_compile", False)),
     )
+
+
+def _operation_timeout_seconds(config: dict[str, Any]) -> int:
+    try:
+        timeout = int(config.get("gliner2_operation_timeout_seconds", 30) or 30)
+    except (TypeError, ValueError):
+        timeout = 30
+    return max(1, min(600, timeout))
 
 
 def _get_torch_runtime_status() -> dict[str, Any]:
@@ -68,18 +77,26 @@ def get_runtime_status(
     model_name = str(cfg.get("gliner2_model", "fastino/gliner2-base-v1") or "fastino/gliner2-base-v1")
     api_key_env = str(cfg.get("gliner2_api_key_env", "PIONEER_API_KEY") or "PIONEER_API_KEY")
     gliner_cls, import_error = _import_gliner2()
-    client = (
-        get_client(cfg)
-        if load_model and gliner_cls is not None
-        else (_CLIENTS.get(_config_key(cfg)) if cfg else None)
-    )
-    if load_model and client is not None:
-        client.is_available()
+    client = get_client(cfg)
+    model_load_started = False
+    if load_model and gliner_cls is not None:
+        model_load_started = client.start_loading()
     torch_status = _get_torch_runtime_status()
     in_docker = os.path.exists("/.dockerenv")
-    model_loaded = bool(client and client.model is not None)
+    model_loaded = client.is_loaded()
+    model_loading = client.is_loading()
+    model_loading_seconds = client.loading_seconds()
+    operation_timeout_seconds = _operation_timeout_seconds(cfg)
+    model_load_slow = (
+        model_loading_seconds is not None
+        and model_loading_seconds >= operation_timeout_seconds
+    )
     model_state = "loaded" if model_loaded else "not_loaded"
-    if client and client.last_error:
+    if import_error:
+        model_state = "package_missing"
+    elif model_loading:
+        model_state = "loading"
+    elif client.last_error:
         model_state = "load_failed"
 
     return {
@@ -103,16 +120,29 @@ def get_runtime_status(
         "consolidation_triage": bool(cfg.get("gliner2_consolidation_triage", True)),
         "package_installed": gliner_cls is not None,
         "model_loaded": model_loaded,
+        "model_loading": model_loading,
+        "model_loading_seconds": model_loading_seconds,
+        "model_load_slow": model_load_slow,
+        "operation_timeout_seconds": operation_timeout_seconds,
         "model_state": model_state,
         "model_status_note": (
             "Model object is loaded in this Agent Zero process."
             if model_loaded
             else (
-                "Model is installed but not loaded yet; run a sample extraction "
-                "or Load Model to initialize it."
+                "Model load is running in the background."
+                if model_loading
+                else (
+                    "Install the GLiNER2 package before loading a model."
+                    if import_error
+                    else (
+                        "Model is installed but not loaded yet; click Load Model "
+                        "or run an explicit extraction to initialize it."
+                    )
+                )
             )
         ),
         "status_loaded_model": bool(load_model),
+        "model_load_started": model_load_started,
         "mode": mode,
         "model_name": model_name if mode == "local" else "api",
         "api_key_env": api_key_env,
@@ -139,6 +169,26 @@ def get_client(config: dict[str, Any] | None) -> "GLiNER2Client":
         return client
 
 
+def get_loaded_client_or_status(
+    config: dict[str, Any] | None,
+) -> tuple["GLiNER2Client | None", dict[str, Any]]:
+    cfg = config or {}
+    status = get_runtime_status(cfg, load_model=False)
+    client = get_client(cfg)
+
+    if not status["package_installed"]:
+        return None, status
+
+    if client.is_available(load_model=False):
+        return client, status
+
+    model_load_started = client.start_loading()
+    status = get_runtime_status(cfg, load_model=False)
+    if model_load_started:
+        status["model_load_started"] = True
+    return None, status
+
+
 class GLiNER2Client:
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         self.config = deepcopy(config or {})
@@ -146,10 +196,51 @@ class GLiNER2Client:
         self.model: Any | None = None
         self.last_error = ""
         self._import_error = ""
+        self._load_thread: threading.Thread | None = None
+        self._loading_started_at: float | None = None
 
-    def is_available(self) -> bool:
-        self._ensure_model()
+    def is_loaded(self) -> bool:
         return self.model is not None
+
+    def is_loading(self) -> bool:
+        thread = self._load_thread
+        if thread is None:
+            return self._loading_started_at is not None
+        if thread.is_alive():
+            return True
+        self._load_thread = None
+        return self._loading_started_at is not None
+
+    def loading_seconds(self) -> float | None:
+        if self._loading_started_at is None:
+            return None
+        return round(max(0.0, time.monotonic() - self._loading_started_at), 1)
+
+    def is_available(self, load_model: bool = True) -> bool:
+        if load_model:
+            self._ensure_model()
+        return self.model is not None
+
+    def start_loading(self) -> bool:
+        if self.model is not None:
+            return False
+        if self.is_loading():
+            return False
+
+        self.last_error = ""
+        self._loading_started_at = time.monotonic()
+
+        def _load() -> None:
+            try:
+                self._ensure_model()
+            finally:
+                if threading.current_thread() is self._load_thread:
+                    self._load_thread = None
+
+        thread = threading.Thread(target=_load, name="gliner2-model-load", daemon=True)
+        self._load_thread = thread
+        thread.start()
+        return True
 
     def _ensure_model(self) -> Any | None:
         if self.model is not None:
@@ -163,8 +254,10 @@ class GLiNER2Client:
             self._import_error = import_error
             if gliner_cls is None:
                 self.last_error = import_error or "gliner2 is not installed."
+                self._loading_started_at = None
                 return None
 
+            self._loading_started_at = time.monotonic()
             try:
                 mode = str(self.config.get("gliner2_mode", "local") or "local").lower()
                 if mode == "api":
@@ -186,6 +279,8 @@ class GLiNER2Client:
             except Exception as e:
                 self.model = None
                 self.last_error = str(e)
+            finally:
+                self._loading_started_at = None
 
         return self.model
 

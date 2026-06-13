@@ -16,6 +16,7 @@ gliner2_consolidation_triage: true
 gliner2_consolidation_triage_threshold: 0.65
 gliner2_knowledge_import_enrichment: true
 gliner2_tool_enabled: true
+gliner2_operation_timeout_seconds: 30
 gliner2_memory_entity_types:
   - person
   - organization

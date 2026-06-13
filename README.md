@@ -48,6 +48,7 @@ Configuration:
 - `gliner2_consolidation_triage_threshold`: minimum confidence for accepting a consolidation triage decision
 - `gliner2_knowledge_import_enrichment`: add structured entity metadata during knowledge import
 - `gliner2_tool_enabled`: allow direct agent tool use
+- `gliner2_operation_timeout_seconds`: maximum wait for explicit extraction or automatic Utility-model replacement before returning/falling back
 - `gliner2_memory_entity_types`: entity labels used when the tool or hook needs a default entities schema
 - `gliner2_import_entity_types`: entity labels used for knowledge import metadata enrichment
 
@@ -81,6 +82,10 @@ Observability:
   entity counts, or triage action where applicable
 - if GLiNER2 cannot handle a call and Utility fallback is enabled, no GLiNER2
   usage log is written because the configured Utility model handled the call
+- status uses `model_state` values of `package_missing`, `not_loaded`,
+  `loading`, `loaded`, or `load_failed`
+- automatic memory and knowledge hooks only use an already loaded GLiNER2 model;
+  use Load Model or an explicit extraction to initialize the runtime first
 
 Privacy:
 - local mode keeps extraction on the local machine

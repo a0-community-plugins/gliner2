@@ -33,6 +33,14 @@ def _coerce_float(value: Any, default: float, minimum: float, maximum: float) ->
     return max(minimum, min(maximum, result))
 
 
+def _coerce_int(value: Any, default: int, minimum: int, maximum: int) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        result = default
+    return max(minimum, min(maximum, result))
+
+
 def _coerce_string_list(value: Any, default: list[str] | None = None) -> list[str]:
     fallback = list(default or [])
     raw = value
@@ -106,6 +114,9 @@ def _normalize_config(config: dict[str, Any] | None) -> dict[str, Any]:
         cfg.get("gliner2_knowledge_import_enrichment"), True
     )
     cfg["gliner2_tool_enabled"] = _coerce_bool(cfg.get("gliner2_tool_enabled"), True)
+    cfg["gliner2_operation_timeout_seconds"] = _coerce_int(
+        cfg.get("gliner2_operation_timeout_seconds"), 30, 1, 600
+    )
     cfg["gliner2_memory_entity_types"] = _coerce_string_list(
         cfg.get("gliner2_memory_entity_types"), DEFAULT_ENTITY_TYPES
     )
@@ -197,7 +208,7 @@ def provide_memory_keywords(agent=None, text: str = "", **kwargs):
         return None
 
     client = get_client(config)
-    if not client.is_available():
+    if not client.is_available(load_model=False):
         return None
 
     result = client.extract_entities(
@@ -225,7 +236,7 @@ def enrich_knowledge_metadata(
         return None
 
     client = get_client(config)
-    if not client.is_available():
+    if not client.is_available(load_model=False):
         return None
 
     result = client.extract_entities(

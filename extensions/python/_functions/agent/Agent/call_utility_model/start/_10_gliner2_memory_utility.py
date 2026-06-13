@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import ast
 import json
 from typing import Any
@@ -205,7 +206,7 @@ def _extract_entities(
         return None
 
     client = get_client(config)
-    if not client.is_available():
+    if not client.is_available(load_model=False):
         return None
 
     result = client.extract_entities(
@@ -219,7 +220,7 @@ def _extract_entities(
 
 def _get_available_client(config: dict[str, Any]) -> Any | None:
     client = get_client(config)
-    if not client.is_available():
+    if not client.is_available(load_model=False):
         return None
     return client
 
@@ -361,8 +362,23 @@ def _triage_consolidation(config: dict[str, Any], message: str) -> str | None:
     return None
 
 
+async def _run_with_timeout(config: dict[str, Any], func, *args) -> Any | None:
+    try:
+        timeout_seconds = int(config.get("gliner2_operation_timeout_seconds", 30) or 30)
+    except (TypeError, ValueError):
+        timeout_seconds = 30
+
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(func, *args),
+            timeout=max(1, min(600, timeout_seconds)),
+        )
+    except TimeoutError:
+        return None
+
+
 class GLiNER2MemoryUtility(Extension):
-    def execute(self, data: dict[str, Any] | None = None, **kwargs: Any) -> None:
+    async def execute(self, data: dict[str, Any] | None = None, **kwargs: Any) -> None:
         if self.agent is None or not isinstance(data, dict):
             return
 
@@ -381,7 +397,9 @@ class GLiNER2MemoryUtility(Extension):
         if _is_memory_keyword_call(system, message):
             if not config.get("gliner2_memory_keyword_extraction", True):
                 return
-            entities = _extract_entities(
+            entities = await _run_with_timeout(
+                config,
+                _extract_entities,
                 self.agent, config, _extract_memory_content(message)
             )
             if entities:
@@ -413,7 +431,9 @@ class GLiNER2MemoryUtility(Extension):
         if _is_recall_query_call(system, message):
             if not config.get("gliner2_recall_query_enrichment", False):
                 return
-            entities = _extract_entities(
+            entities = await _run_with_timeout(
+                config,
+                _extract_entities,
                 self.agent, config, _extract_recall_content(message)
             )
             if entities:
@@ -445,7 +465,9 @@ class GLiNER2MemoryUtility(Extension):
         if _is_memory_filter_call(system, message):
             if not config.get("gliner2_memory_post_filter", True):
                 return
-            result = _filter_relevant_memories(config, message)
+            result = await _run_with_timeout(
+                config, _filter_relevant_memories, config, message
+            )
             if result is not None:
                 data["result"] = result
                 try:
@@ -479,7 +501,9 @@ class GLiNER2MemoryUtility(Extension):
         if _is_consolidation_call(system, message):
             if not config.get("gliner2_consolidation_triage", True):
                 return
-            result = _triage_consolidation(config, message)
+            result = await _run_with_timeout(
+                config, _triage_consolidation, config, message
+            )
             if result is not None:
                 data["result"] = result
                 try:
