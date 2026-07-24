@@ -107,7 +107,8 @@ def install(
     command = [sys.executable, "-m", "pip", "install", package]
     try:
         result = subprocess.run(
-            command,
+            ["python", "-m", "pip", "install", package],
+            executable=sys.executable,
             capture_output=True,
             text=True,
             timeout=900,
