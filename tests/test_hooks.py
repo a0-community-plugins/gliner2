@@ -47,9 +47,11 @@ def test_flatten_entities_handles_current_shapes_and_casefolds_duplicates() -> N
 
 def test_install_selects_stable_package_spec(monkeypatch) -> None:
     calls: list[list[str]] = []
+    executables: list[str] = []
 
     def fake_run(command, **kwargs):
         calls.append(command)
+        executables.append(kwargs["executable"])
         return SimpleNamespace(returncode=0, stdout="ok", stderr="")
 
     monkeypatch.setattr(hooks.subprocess, "run", fake_run)
@@ -70,6 +72,7 @@ def test_install_selects_stable_package_spec(monkeypatch) -> None:
     assert api_result["package"] == GLINER2_PACKAGE_SPEC
     assert calls[0][-1] == GLINER2_LOCAL_PACKAGE_SPEC
     assert calls[1][-1] == GLINER2_PACKAGE_SPEC
+    assert executables == [hooks.sys.executable, hooks.sys.executable]
 
 
 def test_install_sanitizes_authenticated_index_urls(monkeypatch) -> None:
