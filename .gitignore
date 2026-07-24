@@ -1,0 +1,12 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Agent Zero-owned runtime state
+config.json
+.toggle-0
+.toggle-1
+execute_record.json

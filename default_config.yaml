@@ -1,10 +1,17 @@
 gliner2_enabled: true
 gliner2_mode: local
 gliner2_model: fastino/gliner2-base-v1
+gliner2_device: auto
 gliner2_api_key_env: PIONEER_API_KEY
+gliner2_api_base_url: ""
+gliner2_api_timeout_seconds: 30
+gliner2_api_max_retries: 3
 gliner2_quantize: false
 gliner2_compile: false
 gliner2_entity_threshold: 0.5
+gliner2_max_len: 0
+gliner2_max_text_chars: 50000
+gliner2_max_schema_items: 100
 gliner2_utility_replacement_enabled: true
 gliner2_fallback_to_utility_model: true
 gliner2_usage_logging: true

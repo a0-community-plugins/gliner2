@@ -42,6 +42,19 @@ class GLiNER2:
     monkeypatch.delitem(sys.modules, "gliner2", raising=False)
 
     gliner2_client = _load_client_module()
+    monkeypatch.setattr(gliner2_client, "_package_version", lambda: "1.3.2")
+    monkeypatch.setattr(
+        gliner2_client,
+        "_get_torch_runtime_status",
+        lambda: {
+            "installed": True,
+            "version": "test",
+            "cuda_available": False,
+            "cuda_device_count": 0,
+            "cuda_device_name": "",
+            "error": "",
+        },
+    )
     config = {"gliner2_model": "fake/slow"}
 
     start = time.monotonic()
@@ -50,8 +63,8 @@ class GLiNER2:
 
     assert elapsed < 0.5
     assert status["package_installed"] is True
-    assert status["model_state"] == "loading"
-    assert status["model_loading"] is True
+    assert status["client_state"] == "loading"
+    assert status["client_loading"] is True
 
     client = gliner2_client.get_client(config)
     deadline = time.monotonic() + 2
@@ -102,6 +115,19 @@ class GLiNER2:
     monkeypatch.delitem(sys.modules, "gliner2", raising=False)
 
     gliner2_client = _load_client_module()
+    monkeypatch.setattr(gliner2_client, "_package_version", lambda: "1.3.2")
+    monkeypatch.setattr(
+        gliner2_client,
+        "_get_torch_runtime_status",
+        lambda: {
+            "installed": True,
+            "version": "test",
+            "cuda_available": False,
+            "cuda_device_count": 0,
+            "cuda_device_name": "",
+            "error": "",
+        },
+    )
     config = {"gliner2_model": "fake/slow"}
 
     start = time.monotonic()
@@ -110,7 +136,7 @@ class GLiNER2:
 
     assert client is None
     assert elapsed < 0.5
-    assert status["model_state"] == "loading"
+    assert status["client_state"] == "loading"
     assert status["model_load_started"] is True
 
     client = gliner2_client.get_client(config)
