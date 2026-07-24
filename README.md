@@ -1,105 +1,225 @@
-# GLiNER2 Plugin
+# GLiNER2 for Agent Zero
 
-`gliner2` adds local or API-backed schema-driven information extraction to Agent Zero.
-The runtime plugin directory is `usr/plugins/gliner2`, and the manifest `name`
-must stay `gliner2` to match Agent Zero plugin discovery rules.
+GLiNER2 gives Agent Zero a purpose-built structured inference path for:
 
-What it does:
-- exposes a direct `gliner2_extract` tool for entities, classification, JSON extraction, and relations
-- exposes a framework extension that can replace eligible memory utility-model calls with GLiNER2 entity extraction
-- exposes framework hooks for memory keyword extraction and knowledge metadata enrichment
-- includes a plugin settings panel with runtime status, install actions, and a sample extraction workflow
-- normalizes saved settings so booleans, thresholds, modes, and entity type lists stay runtime-safe
+- entity extraction
+- text classification
+- typed JSON extraction
+- relation extraction
+- memory keywords, relevance filtering, and conservative consolidation triage
+- knowledge-import metadata enrichment
 
-Installation:
-- local mode: `python -m pip install 'gliner2[local]'`
-- api mode: `python -m pip install gliner2`
+It runs either with a local checkpoint or through the GLiNER2 hosted API. The
+plugin does not modify Agent Zero core.
 
-The settings panel install action runs through `hooks.py` using
-`sys.executable -m pip`, so dependencies are installed into the Agent Zero
-framework Python runtime. In Docker this is `/opt/venv-a0`, not the separate
-agent execution runtime at `/opt/venv`.
+## Install
 
-Docker and GPU:
-1. Start Agent Zero with Docker GPU passthrough, for example add `--gpus all` to your `docker run` command.
-2. In the GLiNER plugin, select `local` mode and run the install action. This installs inside the Agent Zero framework runtime in the container.
-3. Refresh the GLiNER status panel and confirm `torch_cuda_available` is `true`.
-4. If CUDA is still unavailable, install a CUDA-enabled Linux pip build of PyTorch inside the container using the command from PyTorch Start Locally: https://docs.pytorch.org/get-started/locally/
+Install from Agent Zero's Plugin Hub. The Plugin Hub invokes `hooks.py`
+automatically, and the hook installs the supported runtime into Agent Zero's
+framework Python environment:
 
-Notes:
-- GLiNER2’s README says `pip install gliner2[local]` is the local inference package and enables quantization / `torch.compile` GPU options.
-- PyTorch’s Linux install docs say to choose the CUDA version that matches your machine, then verify with `torch.cuda.is_available()`.
+- local: `gliner2[local]>=1.3.2,<2`
+- API: `gliner2>=1.3.2,<2`
 
-Configuration:
-- `gliner2_enabled`: master enable switch
-- `gliner2_mode`: `local` or `api`
-- `gliner2_model`: local Hugging Face model id
-- `gliner2_api_key_env`: environment variable that holds the Pioneer API key
-- `gliner2_quantize`: request quantized local loading on CUDA
-- `gliner2_compile`: request `torch.compile` on CUDA
-- `gliner2_utility_replacement_enabled`: master switch for replacing eligible memory utility-model calls
-- `gliner2_fallback_to_utility_model`: allow the selected Utility model to run when GLiNER2 cannot produce a replacement
-- `gliner2_usage_logging`: show a util log entry whenever GLiNER2 replaces an eligible Utility-model memory call
-- `gliner2_memory_keyword_extraction`: let GLiNER2 provide memory-search keywords
-- `gliner2_recall_query_enrichment`: let GLiNER2 produce memory recall queries when `_memory` query prep is enabled
-- `gliner2_memory_post_filter`: let GLiNER2 classify recalled memories and solutions for relevance
-- `gliner2_post_filter_threshold`: minimum confidence for accepting a post-filter relevance decision
-- `gliner2_consolidation_triage`: let GLiNER2 skip or keep separate obvious consolidation cases
-- `gliner2_consolidation_triage_threshold`: minimum confidence for accepting a consolidation triage decision
-- `gliner2_knowledge_import_enrichment`: add structured entity metadata during knowledge import
-- `gliner2_tool_enabled`: allow direct agent tool use
-- `gliner2_operation_timeout_seconds`: maximum wait for explicit extraction or automatic Utility-model replacement before returning/falling back
-- `gliner2_memory_entity_types`: entity labels used when the tool or hook needs a default entities schema
-- `gliner2_import_entity_types`: entity labels used for knowledge import metadata enrichment
+The default route is local, so a normal Plugin Hub install prepares the local
+runtime in one flow. The settings panel also provides an **Install / repair**
+action for a changed mode or interrupted dependency install.
 
-Tool prompt:
-- the discoverable prompt file is `prompts/agent.system.tool.gliner2_extract.md`
-- Agent Zero only loads tool prompts matching `agent.system.tool.*.md`
+The hook deliberately uses `sys.executable -m pip`. In the official Docker
+image that targets `/opt/venv-a0`, where plugin hooks and the Agent Zero backend
+run. It does not install into the separate `/opt/venv` agent execution
+environment.
 
-Framework hooks:
-- `extensions/python/_functions/agent/Agent/call_utility_model/start/_10_gliner2_memory_utility.py` short-circuits only GLiNER-compatible memory utility calls
-- `provide_memory_keywords(agent, text)` returns flattened entities when GLiNER2 is enabled and available
-- `enrich_knowledge_metadata(agent, text, metadata, log_item)` returns GLiNER2 entity metadata when enabled and available
-- `get_plugin_config` and `save_plugin_config` normalize plugin settings loaded through Agent Zero
-- `install(mode, config)` installs either `gliner2[local]` or `gliner2`
-- `pre_update()` is present for Plugin Hub update compatibility
+## Start here
 
-Utility model replacement is intentionally scoped. GLiNER2 can replace memory
-keyword extraction, memory recall query prep, memory post-filter relevance
-classification, and safe consolidation triage because those calls can be
-answered by extraction or classification. It does not replace general Utility
-model work such as summarization, behavior merging, or consolidation actions
-that need rewritten memory content. Merge, replace, and update consolidation
-decisions still fall through to the configured Utility model when fallback is
-enabled. If `gliner2_fallback_to_utility_model` is off, eligible memory calls
-return conservative non-generative defaults instead of falling through to the
-configured Utility model.
+1. Open **Settings → Plugins → GLiNER2**.
+2. Choose **Local runtime** or **Hosted API**.
+3. Confirm that the readiness console shows no blockers.
+4. Select **Load model** or **Connect API**. Local model startup runs in the
+   background; the console reports `Starting` until it is ready.
+5. Run the built-in test bench before enabling memory replacements broadly.
 
-Observability:
-- when `gliner2_usage_logging` is enabled, each replacement writes a `util`
-  log entry headed `GLiNER2 used: ...`
-- log details include the plugin id, mode, feature, thresholds, selected counts,
-  entity counts, or triage action where applicable
-- if GLiNER2 cannot handle a call and Utility fallback is enabled, no GLiNER2
-  usage log is written because the configured Utility model handled the call
-- status uses `model_state` values of `package_missing`, `not_loaded`,
-  `loading`, `loaded`, or `load_failed`
-- automatic memory and knowledge hooks only use an already loaded GLiNER2 model;
-  use Load Model or an explicit extraction to initialize the runtime first
+Saved global, project, and agent-scoped settings are honored. Version 2.0
+removes the old config-read hook that accidentally replaced loaded settings
+with defaults.
 
-Privacy:
-- local mode keeps extraction on the local machine
-- API mode uses the Pioneer-hosted GLiNER2 API and requires an API key
+## Local mode
 
-Troubleshooting:
-- if status says the package is missing, use the install action in plugin settings or run the pip command manually
-- `model_loaded: false` means no GLiNER model object has been initialized in the current Agent Zero process yet; use Load Model or run Sample Extraction to initialize it
-- if you are in Docker and want GPU, make sure the container was started with GPU access before troubleshooting PyTorch inside it
-- if `torch_cuda_available` is `false`, install or reinstall the CUDA-enabled Linux pip build of PyTorch inside the container and refresh status
-- if local model loading fails, try disabling quantize/compile first
-- if API mode fails, verify the configured environment variable exists and contains a valid Pioneer API key
+The default model is `fastino/gliner2-base-v1`.
 
-Community plugin notes:
-- for Plugin Index publication, keep this plugin as a standalone repository with `plugin.yaml` at the repository root
-- include a repository-level `LICENSE` before submitting to the Plugin Index
-- do not publish local `config.json` values or secrets
+Device options:
+
+- **Auto** uses CUDA when PyTorch can see a CUDA device, otherwise CPU.
+- **CPU** explicitly keeps inference on CPU.
+- **CUDA** fails closed with a clear blocker when CUDA is unavailable.
+
+Quantization and `torch.compile` are applied only on CUDA. When either option is
+enabled on CPU, the runtime skips it and reports a warning instead of attempting
+an invalid model load.
+
+### Docker GPU access
+
+The plugin can detect GPU visibility but cannot grant a running container new
+host-device permissions. Recreate Agent Zero with GPU passthrough—commonly
+`--gpus all`—then confirm the GLiNER2 console reports CUDA. CPU mode remains a
+fully supported setup and requires no Docker socket.
+
+No Docker socket is required by this plugin.
+
+## API mode
+
+API mode installs the lightweight base package and reads the credential from an
+environment variable. `PIONEER_API_KEY` is the default.
+
+The plugin passes the credential directly to the public `GLiNER2API` client. It never
+copies a custom credential into `PIONEER_API_KEY`, persists the secret in
+`config.json`, or displays the secret in diagnostics.
+
+You can optionally configure:
+
+- a custom API base URL
+- request timeout
+- retry count
+
+API mode sends extraction text and schemas to the configured endpoint. Local
+mode keeps extraction in the Agent Zero runtime.
+
+## Agent tool
+
+The discoverable tool is `gliner2_extract`.
+
+Arguments:
+
+- `task`: `entities`, `classify`, `json`, or `relations`
+- `text`: source text
+- `schema`: task-specific JSON array or object
+- `include_confidence`: include model confidence where supported
+- `include_spans`: include source spans where supported
+
+Examples:
+
+```json
+{
+  "task": "entities",
+  "text": "Ada Lovelace worked with Charles Babbage in London.",
+  "schema": ["person", "location"],
+  "include_confidence": true
+}
+```
+
+```json
+{
+  "task": "classify",
+  "text": "The release is stable and dramatically faster.",
+  "schema": {
+    "sentiment": ["positive", "negative", "neutral"]
+  }
+}
+```
+
+All four task wrappers forward the configured extraction threshold. Local
+methods also receive the optional model maximum length; API methods safely
+ignore unsupported keyword arguments.
+
+## Memory integration
+
+The framework extension intercepts only utility-model calls whose current
+Agent Zero prompt shape is compatible with extraction or classification:
+
+- memory keyword extraction
+- recall-query enrichment
+- recalled-memory relevance filtering
+- conservative consolidation triage
+
+Generative merge, replace, and update decisions still fall through to the
+configured Utility model. Missing confidence also falls through; it is never
+treated as certainty.
+
+When **Safe Utility fallback** is disabled, the extension returns conservative
+empty/skip results for eligible calls it cannot answer. This is useful for
+fully non-generative paths, but the default is to keep fallback enabled.
+
+When **Usage observability** is enabled, successful replacements appear as
+`util` log entries with the feature, mode, counts, thresholds, and timing-safe
+metadata. Source text and API credentials are not added to those entries.
+
+## Runtime safety
+
+Version 2.0 adds:
+
+- bounded input text, schema size, and optional model length
+- serialized model load and inference access
+- non-blocking background model startup with visible loading state
+- background execution for async tools, diagnostics, and utility extensions
+- a bounded operation wait before explicit extraction or Utility replacement
+  falls back
+- a bounded in-process client cache
+- explicit CUDA readiness checks
+- package compatibility reporting
+- sanitized dependency-install output
+- case-insensitive entity deduplication across current GLiNER2 result shapes
+
+The default limits are 50,000 text characters and 100 nested schema items per
+call. The settings UI can tune these within hard ceilings.
+
+## Configuration reference
+
+Core runtime:
+
+- `gliner2_enabled`
+- `gliner2_mode`
+- `gliner2_model`
+- `gliner2_device`
+- `gliner2_api_key_env`
+- `gliner2_api_base_url`
+- `gliner2_api_timeout_seconds`
+- `gliner2_api_max_retries`
+- `gliner2_quantize`
+- `gliner2_compile`
+- `gliner2_entity_threshold`
+- `gliner2_max_len`
+- `gliner2_max_text_chars`
+- `gliner2_max_schema_items`
+- `gliner2_operation_timeout_seconds`
+
+Agent Zero integrations:
+
+- `gliner2_tool_enabled`
+- `gliner2_utility_replacement_enabled`
+- `gliner2_fallback_to_utility_model`
+- `gliner2_usage_logging`
+- `gliner2_memory_keyword_extraction`
+- `gliner2_recall_query_enrichment`
+- `gliner2_memory_post_filter`
+- `gliner2_post_filter_threshold`
+- `gliner2_consolidation_triage`
+- `gliner2_consolidation_triage_threshold`
+- `gliner2_knowledge_import_enrichment`
+- `gliner2_memory_entity_types`
+- `gliner2_import_entity_types`
+
+## Development and verification
+
+Run the focused suite from an Agent Zero checkout or from this standalone
+repository:
+
+```bash
+pytest -q
+```
+
+The tests use fake GLiNER2 runtimes; they do not download a model, install
+dependencies, or call the hosted API. GitHub Actions runs the suite on Python
+3.11, 3.12, and 3.13.
+
+For a delivery check, open the live settings panel, verify the readiness cards
+at narrow and wide widths, and run the test bench against the route you intend
+to use.
+
+## Upstream
+
+This integration tracks the public
+[fastino-ai/GLiNER2](https://github.com/fastino-ai/GLiNER2) API and currently
+supports the stable 1.x line from 1.3.2 onward. The upper bound prevents a future
+major API change from silently breaking an installed plugin.
+
+Licensed under Apache License 2.0.

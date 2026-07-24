@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import ast
 import json
+import threading
 from typing import Any
 
 from helpers.extension import Extension
 from usr.plugins.gliner2 import hooks
+from usr.plugins.gliner2.helpers.config import validate_text
 from usr.plugins.gliner2.helpers.gliner2_client import get_client
 
 
@@ -190,11 +192,14 @@ def _classify(
     text: str,
     field_name: str,
     labels: list[str],
+    max_len: int | None = None,
 ) -> tuple[str, float | None]:
     result = client.classify_text(
         text=text,
         schema={field_name: labels},
+        threshold=0.0,
         include_confidence=True,
+        max_len=max_len,
     )
     return _extract_label_and_confidence(result, field_name)
 
@@ -202,7 +207,8 @@ def _classify(
 def _extract_entities(
     agent: Any, config: dict[str, Any], text: str
 ) -> list[str] | None:
-    if not text.strip():
+    normalized_text, error = validate_text(text, config)
+    if error:
         return None
 
     client = get_client(config)
@@ -210,9 +216,10 @@ def _extract_entities(
         return None
 
     result = client.extract_entities(
-        text=text,
+        text=normalized_text,
         schema=config.get("gliner2_memory_entity_types", []) or [],
         threshold=float(config.get("gliner2_entity_threshold", 0.5) or 0.5),
+        max_len=int(config.get("gliner2_max_len", 0) or 0) or None,
     )
     entities = hooks._flatten_entities(result)
     return entities or None
@@ -282,16 +289,22 @@ def _filter_relevant_memories(config: dict[str, Any], message: str) -> str | Non
             ]
             if part.strip()
         )
+        classification_text, validation_error = validate_text(
+            classification_text, config
+        )
+        if validation_error:
+            continue
         label, confidence = _classify(
             client,
             classification_text,
             "relevance",
             ["relevant", "irrelevant"],
+            max_len=int(config.get("gliner2_max_len", 0) or 0) or None,
         )
         if not label:
             continue
 
-        confidence = 1.0 if confidence is None else confidence
+        confidence = 0.0 if confidence is None else confidence
         if confidence >= threshold:
             saw_confident_result = True
             if label in {"relevant", "yes", "include", "included"}:
@@ -334,6 +347,10 @@ def _triage_consolidation(config: dict[str, Any], message: str) -> str | None:
     if client is None:
         return None
 
+    message, validation_error = validate_text(message, config)
+    if validation_error:
+        return None
+
     threshold = float(
         config.get("gliner2_consolidation_triage_threshold", 0.65) or 0.65
     )
@@ -342,11 +359,12 @@ def _triage_consolidation(config: dict[str, Any], message: str) -> str | None:
         message,
         "action",
         ["keep_separate", "skip", "merge", "replace", "update"],
+        max_len=int(config.get("gliner2_max_len", 0) or 0) or None,
     )
     if not label:
         return None
 
-    confidence = 1.0 if confidence is None else confidence
+    confidence = 0.0 if confidence is None else confidence
     if confidence < threshold:
         return None
 
@@ -362,27 +380,50 @@ def _triage_consolidation(config: dict[str, Any], message: str) -> str | None:
     return None
 
 
-async def _run_with_timeout(config: dict[str, Any], func, *args) -> Any | None:
-    try:
-        timeout_seconds = int(config.get("gliner2_operation_timeout_seconds", 30) or 30)
-    except (TypeError, ValueError):
-        timeout_seconds = 30
-
-    try:
-        return await asyncio.wait_for(
-            asyncio.to_thread(func, *args),
-            timeout=max(1, min(600, timeout_seconds)),
-        )
-    except TimeoutError:
-        return None
-
-
 class GLiNER2MemoryUtility(Extension):
-    async def execute(self, data: dict[str, Any] | None = None, **kwargs: Any) -> None:
+    async def execute(
+        self,
+        data: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
         if self.agent is None or not isinstance(data, dict):
             return
 
         config = hooks._get_config(agent=self.agent)
+        timeout_seconds = int(
+            config.get("gliner2_operation_timeout_seconds", 30) or 30
+        )
+        cancelled = threading.Event()
+        working_data = dict(data)
+        working_data.pop("result", None)
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(
+                    self._execute_sync,
+                    working_data,
+                    config,
+                    cancelled,
+                ),
+                timeout=timeout_seconds,
+            )
+        except TimeoutError:
+            cancelled.set()
+            return
+
+        if not cancelled.is_set() and "result" in working_data:
+            data["result"] = working_data["result"]
+
+    def _execute_sync(
+        self,
+        data: dict[str, Any] | None = None,
+        config: dict[str, Any] | None = None,
+        cancelled: threading.Event | None = None,
+    ) -> None:
+        if self.agent is None or not isinstance(data, dict):
+            return
+
+        config = config or hooks._get_config(agent=self.agent)
+        cancelled = cancelled or threading.Event()
         if not config.get("gliner2_enabled", True):
             return
         if not config.get("gliner2_utility_replacement_enabled", True):
@@ -397,11 +438,11 @@ class GLiNER2MemoryUtility(Extension):
         if _is_memory_keyword_call(system, message):
             if not config.get("gliner2_memory_keyword_extraction", True):
                 return
-            entities = await _run_with_timeout(
-                config,
-                _extract_entities,
+            entities = _extract_entities(
                 self.agent, config, _extract_memory_content(message)
             )
+            if cancelled.is_set():
+                return
             if entities:
                 data["result"] = json.dumps(entities)
                 _log_gliner_usage(
@@ -431,11 +472,11 @@ class GLiNER2MemoryUtility(Extension):
         if _is_recall_query_call(system, message):
             if not config.get("gliner2_recall_query_enrichment", False):
                 return
-            entities = await _run_with_timeout(
-                config,
-                _extract_entities,
+            entities = _extract_entities(
                 self.agent, config, _extract_recall_content(message)
             )
+            if cancelled.is_set():
+                return
             if entities:
                 data["result"] = " ".join(entities)
                 _log_gliner_usage(
@@ -465,9 +506,9 @@ class GLiNER2MemoryUtility(Extension):
         if _is_memory_filter_call(system, message):
             if not config.get("gliner2_memory_post_filter", True):
                 return
-            result = await _run_with_timeout(
-                config, _filter_relevant_memories, config, message
-            )
+            result = _filter_relevant_memories(config, message)
+            if cancelled.is_set():
+                return
             if result is not None:
                 data["result"] = result
                 try:
@@ -501,9 +542,9 @@ class GLiNER2MemoryUtility(Extension):
         if _is_consolidation_call(system, message):
             if not config.get("gliner2_consolidation_triage", True):
                 return
-            result = await _run_with_timeout(
-                config, _triage_consolidation, config, message
-            )
+            result = _triage_consolidation(config, message)
+            if cancelled.is_set():
+                return
             if result is not None:
                 data["result"] = result
                 try:

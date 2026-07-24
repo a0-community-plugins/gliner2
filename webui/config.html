@@ -4,58 +4,6 @@
     <script>
         window.gliner2SettingsView = function (context, config) {
             return {
-                taskSchemaPresets: {
-                    entities: '["person", "organization", "location", "date"]',
-                    classify: '{"sentiment": ["positive", "negative", "neutral"]}',
-                    json: '{"product": ["name", "price", "features"]}',
-                    relations: '["works_for", "located_in", "reports_to"]',
-                },
-                get localInstallLabel() {
-                    return config.gliner2_mode === "local" ? "Install Local Runtime" : "Install API Runtime";
-                },
-                gpuChecks() {
-                    const status = this.status || {};
-                    return [
-                        {
-                            label: "Running inside Docker",
-                            ok: !!status.in_docker,
-                            detail: status.in_docker
-                                ? "Agent Zero is running in a container."
-                                : "This instance does not appear to be running in Docker.",
-                        },
-                        {
-                            label: "PyTorch installed in the container",
-                            ok: !!status.torch_installed,
-                            detail: status.torch_installed
-                                ? `Torch ${status.torch_version || ""}`.trim()
-                                : (status.torch_error || "Torch is not installed in the Agent Zero runtime."),
-                        },
-                        {
-                            label: "CUDA visible inside the container",
-                            ok: !!status.torch_cuda_available,
-                            detail: status.torch_cuda_available
-                                ? `${status.torch_cuda_device_name || "GPU detected"}${status.torch_cuda_device_count ? ` (${status.torch_cuda_device_count} device${status.torch_cuda_device_count === 1 ? "" : "s"})` : ""}`
-                                : "CUDA is not currently available to PyTorch in this container.",
-                        },
-                    ];
-                },
-                hostStepRequired() {
-                    const status = this.status || {};
-                    return !!status.in_docker && !!status.torch_installed && !status.torch_cuda_available;
-                },
-                hostStepMessage() {
-                    const status = this.status || {};
-                    if (!status.in_docker) {
-                        return "GPU enablement guidance here is aimed at Docker-based Agent Zero installs.";
-                    }
-                    if (!status.torch_installed) {
-                        return "Install the local runtime first so the container has GLiNER2 and PyTorch available.";
-                    }
-                    if (!status.torch_cuda_available) {
-                        return "Host step required: recreate the Agent Zero container with GPU passthrough, for example `--gpus all`. The plugin UI cannot grant GPU access to an already-running container.";
-                    }
-                    return "Container GPU access is available. You can now use local mode and optionally enable fp16 quantization or torch.compile.";
-                },
                 status: null,
                 statusLoading: false,
                 installRunning: false,
@@ -64,19 +12,159 @@
                 testText: "Ada Lovelace worked with Charles Babbage on the Analytical Engine in London.",
                 testSchemaText: '["person", "organization", "location", "date"]',
                 testResult: "",
+                taskSchemaPresets: {
+                    entities: '["person", "organization", "location", "date"]',
+                    classify: '{"sentiment": ["positive", "negative", "neutral"]}',
+                    json: '{"product": ["name", "price", "features"]}',
+                    relations: '["works_for", "located_in", "reports_to"]',
+                },
+                get readinessTone() {
+                    return this.status?.readiness || "checking";
+                },
+                get readinessLabel() {
+                    const labels = {
+                        ready: "Runtime ready",
+                        loading: "Runtime starting",
+                        configured: "Configured · not loaded",
+                        failed: "Startup failed",
+                        blocked: "Action required",
+                        checking: "Checking runtime",
+                    };
+                    return labels[this.readinessTone] || labels.checking;
+                },
+                get readinessCopy() {
+                    if (this.statusLoading) return "Inspecting the Agent Zero framework runtime…";
+                    if (!this.status) return "Runtime status has not loaded yet.";
+                    if (this.status.readiness === "ready") {
+                        return this.status.mode === "api"
+                            ? "The hosted client is initialized and ready for extraction."
+                            : `The local model is loaded on ${this.status.resolved_device || "the selected device"}.`;
+                    }
+                    if (this.status.readiness === "configured") {
+                        return "Everything required is present. Connect once to initialize the client.";
+                    }
+                    if (this.status.readiness === "loading") {
+                        const elapsed = this.status.client_loading_seconds;
+                        return elapsed == null
+                            ? "Model initialization is running in the background."
+                            : `Model initialization is running in the background · ${elapsed} seconds.`;
+                    }
+                    return (this.status.blockers || [])[0] || "Review the checks below.";
+                },
+                get connectLabel() {
+                    if (this.statusLoading) return "Checking…";
+                    if (this.status?.client_loading) return "Loading…";
+                    if (config.gliner2_mode === "api") return "Connect API";
+                    return this.status?.client_loaded ? "Model loaded" : "Load model";
+                },
+                get installLabel() {
+                    return this.installRunning
+                        ? "Installing…"
+                        : (config.gliner2_mode === "local"
+                            ? "Install / repair local runtime"
+                            : "Install / repair API runtime");
+                },
+                get canConnect() {
+                    const s = this.status || {};
+                    if (this.statusLoading || s.client_loaded || s.client_loading) return false;
+                    if (!s.package_installed || !s.package_compatible || !s.runtime_importable) {
+                        return false;
+                    }
+                    if (config.gliner2_mode === "api" && !s.api_key_configured) return false;
+                    if (config.gliner2_mode === "local" && config.gliner2_device === "cuda" && !s.torch_cuda_available) {
+                        return false;
+                    }
+                    return true;
+                },
+                get installNeedsAttention() {
+                    const s = this.status || {};
+                    return !s.package_installed || !s.package_compatible || !s.runtime_importable;
+                },
+                get statusCards() {
+                    const s = this.status || {};
+                    const packageValue = s.package_installed
+                        ? `v${s.package_version || "unknown"}`
+                        : "Missing";
+                    const packageDetail = s.package_installed
+                        ? (s.package_compatible ? "Supported package" : "Version needs attention")
+                        : (s.package_spec || "Waiting for status");
+
+                    let computeValue = "Checking";
+                    let computeDetail = "Reading runtime capabilities";
+                    if (s.mode === "api") {
+                        computeValue = s.api_key_configured ? "Credential found" : "Credential missing";
+                        computeDetail = s.api_key_env || config.gliner2_api_key_env;
+                    } else if (s.resolved_device) {
+                        computeValue = String(s.resolved_device).toUpperCase();
+                        computeDetail = s.torch_cuda_available
+                            ? (s.torch_cuda_device_name || "CUDA available")
+                            : "CPU inference";
+                    }
+
+                    return [
+                        {
+                            label: "PACKAGE",
+                            value: packageValue,
+                            detail: packageDetail,
+                            ok: !!s.package_installed && !!s.package_compatible,
+                        },
+                        {
+                            label: "ROUTE",
+                            value: (config.gliner2_mode || "local").toUpperCase(),
+                            detail: config.gliner2_mode === "api"
+                                ? "Pioneer-compatible endpoint"
+                                : (config.gliner2_model || "Local checkpoint"),
+                            ok: true,
+                        },
+                        {
+                            label: "COMPUTE",
+                            value: computeValue,
+                            detail: computeDetail,
+                            ok: s.mode === "api" ? !!s.api_key_configured : !!s.torch_installed,
+                        },
+                        {
+                            label: "CLIENT",
+                            value: s.client_loaded
+                                ? "Online"
+                                : (s.client_loading ? "Starting" : "Cold"),
+                            detail: s.client_loaded
+                                ? `${s.last_operation || "Initialized"}${s.last_duration_ms != null ? ` · ${s.last_duration_ms} ms` : ""}`
+                                : (s.client_loading
+                                    ? `${s.client_loading_seconds ?? 0} seconds elapsed`
+                                    : "Loads on first extraction"),
+                            ok: !!s.client_loaded,
+                        },
+                    ];
+                },
+                get primaryBlockers() {
+                    return (this.status?.blockers || []).slice(0, 4);
+                },
+                get primaryWarnings() {
+                    return (this.status?.warnings || []).slice(0, 4);
+                },
                 setTask(task) {
                     this.testTask = task;
                     this.testSchemaText = this.taskSchemaPresets[task] || "";
+                    this.testResult = "";
+                },
+                setMode(mode) {
+                    config.gliner2_mode = mode;
+                    this.status = null;
+                    this.refreshStatus();
                 },
                 parseSchema() {
                     const raw = (this.testSchemaText || "").trim();
                     if (!raw) return null;
                     try {
                         return JSON.parse(raw);
-                    } catch (e) {
+                    } catch (error) {
                         window.toastFrontendError?.("Schema must be valid JSON.", "GLiNER2");
-                        return null;
+                        return undefined;
                     }
+                },
+                async readJson(response) {
+                    if (!response) return {};
+                    return typeof response.json === "function" ? await response.json() : response;
                 },
                 async refreshStatus(options = {}) {
                     this.statusLoading = true;
@@ -87,27 +175,42 @@
                             body: JSON.stringify({
                                 project_name: context.projectName || "",
                                 agent_profile: context.agentProfileKey || "",
+                                settings: config,
                                 load_model: !!options.loadModel,
                             }),
                         });
-                        this.status = await response.json();
-                    } catch (e) {
-                        this.status = { ok: false, error: e?.message || "Failed to load status." };
-                        window.toastFrontendError?.(this.status.error, "GLiNER2");
+                        this.status = await this.readJson(response);
+                    } catch (error) {
+                        this.status = {
+                            ok: false,
+                            readiness: "blocked",
+                            blockers: [error?.message || "Failed to load runtime status."],
+                        };
+                        window.toastFrontendError?.(this.status.blockers[0], "GLiNER2");
                     } finally {
                         this.statusLoading = false;
                     }
                 },
-                async loadModel() {
+                async loadClient() {
+                    if (this.status?.client_loaded) return;
                     await this.refreshStatus({ loadModel: true });
-                    if (this.status?.model_loaded) {
-                        window.toastFrontendSuccess?.("Model loaded in the current Agent Zero process.", "GLiNER2");
-                    } else if (this.status?.model_loading) {
-                        window.toastFrontendSuccess?.("Model load started in the background. Refresh status to monitor it.", "GLiNER2");
-                    } else if (this.status?.error) {
-                        window.toastFrontendError?.(this.status.error, "GLiNER2");
+                    if (this.status?.client_loaded) {
+                        window.toastFrontendSuccess?.(
+                            config.gliner2_mode === "api"
+                                ? "GLiNER2 API client connected."
+                                : "GLiNER2 model loaded.",
+                            "GLiNER2"
+                        );
+                    } else if (this.status?.client_loading) {
+                        window.toastFrontendSuccess?.(
+                            "Initialization started in the background. Use Refresh to monitor it.",
+                            "GLiNER2"
+                        );
                     } else {
-                        window.toastFrontendWarning?.("Model is still not loaded.", "GLiNER2");
+                        window.toastFrontendError?.(
+                            this.status?.error || this.primaryBlockers[0] || "Client did not initialize.",
+                            "GLiNER2"
+                        );
                     }
                 },
                 async installForCurrentMode() {
@@ -120,24 +223,34 @@
                                 mode: config.gliner2_mode,
                                 project_name: context.projectName || "",
                                 agent_profile: context.agentProfileKey || "",
+                                settings: config,
                             }),
                         });
-                        const result = await response.json();
+                        const result = await this.readJson(response);
                         if (!result.ok) {
-                            window.toastFrontendError?.(result.stderr || result.error || "Install failed.", "GLiNER2");
+                            window.toastFrontendError?.(
+                                result.stderr || result.error || "Dependency installation failed.",
+                                "GLiNER2"
+                            );
                         } else {
-                            window.toastFrontendSuccess?.("Dependency install finished.", "GLiNER2");
+                            window.toastFrontendSuccess?.(
+                                `${result.package || "GLiNER2"} is installed.`,
+                                "GLiNER2"
+                            );
                         }
                         await this.refreshStatus();
-                    } catch (e) {
-                        window.toastFrontendError?.(e?.message || "Install failed.", "GLiNER2");
+                    } catch (error) {
+                        window.toastFrontendError?.(
+                            error?.message || "Dependency installation failed.",
+                            "GLiNER2"
+                        );
                     } finally {
                         this.installRunning = false;
                     }
                 },
                 async runTestExtraction() {
                     const schema = this.parseSchema();
-                    if ((this.testSchemaText || "").trim() && schema === null) return;
+                    if (schema === undefined) return;
                     this.testRunning = true;
                     this.testResult = "";
                     try {
@@ -148,26 +261,42 @@
                                 task: this.testTask,
                                 text: this.testText,
                                 schema,
+                                include_confidence: true,
+                                include_spans: this.testTask !== "classify",
                                 project_name: context.projectName || "",
                                 agent_profile: context.agentProfileKey || "",
+                                settings: config,
                             }),
                         });
-                        const result = await response.json();
+                        const result = await this.readJson(response);
                         this.testResult = JSON.stringify(result, null, 2);
                         if (!result.ok) {
-                            if (result.model_loading) {
-                                window.toastFrontendWarning?.(result.error || "Model is loading.", "GLiNER2");
+                            if (result.client_loading) {
+                                this.status = { ...(this.status || {}), ...result, readiness: "loading" };
+                                window.toastFrontendWarning?.(
+                                    result.error || "The runtime is starting. Retry shortly.",
+                                    "GLiNER2"
+                                );
                             } else {
-                                window.toastFrontendError?.(result.error || "Extraction failed.", "GLiNER2");
+                                window.toastFrontendError?.(
+                                    result.error || "Extraction failed.",
+                                    "GLiNER2"
+                                );
                             }
+                        } else {
+                            window.toastFrontendSuccess?.("Extraction completed.", "GLiNER2");
+                            await this.refreshStatus();
                         }
-                    } catch (e) {
+                    } catch (error) {
                         this.testResult = JSON.stringify(
-                            { ok: false, error: e?.message || "Extraction failed." },
+                            { ok: false, error: error?.message || "Extraction failed." },
                             null,
                             2
                         );
-                        window.toastFrontendError?.(e?.message || "Extraction failed.", "GLiNER2");
+                        window.toastFrontendError?.(
+                            error?.message || "Extraction failed.",
+                            "GLiNER2"
+                        );
                     } finally {
                         this.testRunning = false;
                     }
@@ -183,466 +312,1143 @@
 <body>
     <div x-data="window.gliner2SettingsView(context, config)" x-init="init()">
         <template x-if="config">
-            <div class="gliner2-config">
-                <div class="section-title">GLiNER2</div>
-                <div class="section-description">
-                    Schema-driven information extraction for memory keywords, knowledge import enrichment, and direct agent use.
-                </div>
-
-                <div class="gliner2-card">
-                    <div class="section-title">Quick Start</div>
-                    <ol class="gliner2-steps">
-                        <li>Start or recreate the Agent Zero Docker container with GPU access: add <code>--gpus all</code>.</li>
-                        <li>In this plugin, choose <code>local</code> mode, then click <span class="gliner2-inline-label">Install Local Runtime</span>.</li>
-                        <li>Click <span class="gliner2-inline-label">Refresh</span> and confirm <code>torch_cuda_available</code> is <code>true</code>.</li>
-                        <li>If CUDA is still false, install the Linux + Pip + CUDA torch command from <a href="https://docs.pytorch.org/get-started/locally/" target="_blank" rel="noreferrer">PyTorch Start Locally</a> inside the container, then refresh here.</li>
-                    </ol>
-                    <div class="section-description">
-                        Optional: after GPU is visible, turn on <code>fp16 quantization</code> and then <code>torch.compile</code> if you want more speed.
+            <main class="gl2-shell">
+                <header class="gl2-hero">
+                    <div class="gl2-eyebrow">
+                        <span class="gl2-mark">G2</span>
+                        <span>STRUCTURED INFERENCE / 2.0</span>
                     </div>
-                </div>
-
-                <div class="gliner2-card">
-                    <div class="section-title">GPU Readiness</div>
-                    <div class="section-description">
-                        These checks tell you whether the current Agent Zero container can actually use the GPU for local GLiNER inference.
+                    <h1>Extraction, not another prompt.</h1>
+                    <p>
+                        Route entities, classifications, typed JSON, and relations through a
+                        purpose-built local model or hosted endpoint—then feed the same engine
+                        into Agent Zero memory.
+                    </p>
+                    <div class="gl2-privacy">
+                        <span class="material-symbols-outlined" aria-hidden="true">shield_lock</span>
+                        <span x-show="config.gliner2_mode === 'local'">
+                            Local mode keeps extraction inside this Agent Zero runtime.
+                        </span>
+                        <span x-show="config.gliner2_mode === 'api'">
+                            API mode sends extraction text and schemas to the configured endpoint.
+                        </span>
                     </div>
-                    <div class="gliner2-checklist">
-                        <template x-for="check in gpuChecks()" :key="check.label">
-                            <div class="gliner2-check" :class="check.ok ? 'is-ok' : 'is-missing'">
-                                <div class="gliner2-check-header">
-                                    <span class="gliner2-check-dot" x-text="check.ok ? 'OK' : 'FIX'"></span>
-                                    <span class="gliner2-check-label" x-text="check.label"></span>
-                                </div>
-                                <div class="gliner2-check-detail" x-text="check.detail"></div>
+                </header>
+
+                <section class="gl2-console" :data-tone="readinessTone">
+                    <div class="gl2-console-head">
+                        <div class="gl2-state-copy">
+                            <span class="gl2-state-dot" aria-hidden="true"></span>
+                            <div>
+                                <div class="gl2-state-label" x-text="readinessLabel"></div>
+                                <div class="gl2-state-detail" x-text="readinessCopy"></div>
                             </div>
-                        </template>
-                    </div>
-                    <div class="gliner2-host-note" :class="hostStepRequired() ? 'is-warning' : 'is-ok-note'" x-text="hostStepMessage()"></div>
-                </div>
-
-                <div class="gliner2-card">
-                    <div class="section-title">General</div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Enable GLiNER2 plugin</div>
-                            <div class="field-description">Master switch for GLiNER2 features.</div>
                         </div>
-                        <div class="field-control">
-                            <label class="toggle">
-                                <input type="checkbox" x-model="config.gliner2_enabled" />
-                                <span class="toggler"></span>
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Inference mode</div>
-                            <div class="field-description">Use a local model or the hosted API.</div>
-                        </div>
-                        <div class="field-control">
-                            <select x-model="config.gliner2_mode">
-                                <option value="local">local</option>
-                                <option value="api">api</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <div class="field" x-show="config.gliner2_mode === 'local'">
-                        <div class="field-label">
-                            <div class="field-title">Local model name</div>
-                            <div class="field-description">Hugging Face model id used for local inference.</div>
-                        </div>
-                        <div class="field-control">
-                            <input type="text" x-model="config.gliner2_model" />
-                        </div>
-                    </div>
-
-                    <div class="field" x-show="config.gliner2_mode === 'api'">
-                        <div class="field-label">
-                            <div class="field-title">API key environment variable</div>
-                            <div class="field-description">Environment variable that contains the Pioneer API key.</div>
-                        </div>
-                        <div class="field-control">
-                            <input type="text" x-model="config.gliner2_api_key_env" />
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Enable fp16 quantization</div>
-                            <div class="field-description">Only applies to supported CUDA local runs.</div>
-                        </div>
-                        <div class="field-control">
-                            <label class="toggle">
-                                <input type="checkbox" x-model="config.gliner2_quantize" />
-                                <span class="toggler"></span>
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Enable torch.compile</div>
-                            <div class="field-description">Only applies to supported CUDA local runs.</div>
-                        </div>
-                        <div class="field-control">
-                            <label class="toggle">
-                                <input type="checkbox" x-model="config.gliner2_compile" />
-                                <span class="toggler"></span>
-                            </label>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="gliner2-card">
-                    <div class="section-title">Memory Integration</div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Replace eligible memory utility calls</div>
-                            <div class="field-description">Intercepts memory keyword and recall-query utility-model calls that GLiNER2 can answer with entity extraction.</div>
-                        </div>
-                        <div class="field-control">
-                            <label class="toggle">
-                                <input type="checkbox" x-model="config.gliner2_utility_replacement_enabled" />
-                                <span class="toggler"></span>
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Fallback to selected Utility model</div>
-                            <div class="field-description">If GLiNER2 is unavailable or finds no entities, allow Agent Zero to continue with the configured Utility model.</div>
-                        </div>
-                        <div class="field-control">
-                            <label class="toggle">
-                                <input type="checkbox" x-model="config.gliner2_fallback_to_utility_model" />
-                                <span class="toggler"></span>
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Show GLiNER2 usage in run log</div>
-                            <div class="field-description">Adds a util log entry whenever GLiNER2 replaces an eligible Utility-model memory call.</div>
-                        </div>
-                        <div class="field-control">
-                            <label class="toggle">
-                                <input type="checkbox" x-model="config.gliner2_usage_logging" />
-                                <span class="toggler"></span>
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Use GLiNER2 for memory keyword extraction</div>
-                            <div class="field-description">Returns extracted entities as memory search keywords instead of calling the Utility model.</div>
-                        </div>
-                        <div class="field-control">
-                            <label class="toggle">
-                                <input type="checkbox" x-model="config.gliner2_memory_keyword_extraction" />
-                                <span class="toggler"></span>
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Recall query enrichment</div>
-                            <div class="field-description">When memory query prep is enabled, builds the recall query from GLiNER2 entities instead of the Utility model.</div>
-                        </div>
-                        <div class="field-control">
-                            <label class="toggle">
-                                <input type="checkbox" x-model="config.gliner2_recall_query_enrichment" />
-                                <span class="toggler"></span>
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Use GLiNER2 for memory post-filtering</div>
-                            <div class="field-description">Classifies recalled memories and solutions as relevant or irrelevant before they are added to context.</div>
-                        </div>
-                        <div class="field-control">
-                            <label class="toggle">
-                                <input type="checkbox" x-model="config.gliner2_memory_post_filter" />
-                                <span class="toggler"></span>
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Post-filter confidence threshold</div>
-                            <div class="field-description">Minimum GLiNER2 confidence required to accept a memory relevance classification.</div>
-                        </div>
-                        <div class="field-control">
-                            <input type="number" min="0" max="1" step="0.01" x-model.number="config.gliner2_post_filter_threshold" />
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Use GLiNER2 for consolidation triage</div>
-                            <div class="field-description">Lets GLiNER2 skip or keep memories separate when confident; merge, replace, and update still use the Utility model unless fallback is disabled.</div>
-                        </div>
-                        <div class="field-control">
-                            <label class="toggle">
-                                <input type="checkbox" x-model="config.gliner2_consolidation_triage" />
-                                <span class="toggler"></span>
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Consolidation triage threshold</div>
-                            <div class="field-description">Minimum GLiNER2 confidence required before bypassing generative consolidation analysis.</div>
-                        </div>
-                        <div class="field-control">
-                            <input type="number" min="0" max="1" step="0.01" x-model.number="config.gliner2_consolidation_triage_threshold" />
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Enrich imported knowledge metadata</div>
-                            <div class="field-description">Adds GLiNER2 entities to document chunk metadata during import.</div>
-                        </div>
-                        <div class="field-control">
-                            <label class="toggle">
-                                <input type="checkbox" x-model="config.gliner2_knowledge_import_enrichment" />
-                                <span class="toggler"></span>
-                            </label>
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Entity confidence threshold</div>
-                            <div class="field-description">Passed through when the underlying GLiNER2 runtime supports thresholding.</div>
-                        </div>
-                        <div class="field-control">
-                            <input type="number" min="0" max="1" step="0.01" x-model.number="config.gliner2_entity_threshold" />
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Operation timeout seconds</div>
-                            <div class="field-description">Maximum wait for explicit extraction or automatic Utility-model replacement before falling back.</div>
-                        </div>
-                        <div class="field-control">
-                            <input type="number" min="1" max="600" step="1" x-model.number="config.gliner2_operation_timeout_seconds" />
-                        </div>
-                    </div>
-                </div>
-
-                <div class="gliner2-card">
-                    <div class="section-title">Tool</div>
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Expose gliner2_extract tool</div>
-                            <div class="field-description">Allows the agent to call GLiNER2 directly for extraction tasks.</div>
-                        </div>
-                        <div class="field-control">
-                            <label class="toggle">
-                                <input type="checkbox" x-model="config.gliner2_tool_enabled" />
-                                <span class="toggler"></span>
-                            </label>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="gliner2-card">
-                    <div class="section-title">Diagnostics</div>
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Runtime status</div>
-                            <div class="field-description">Current package, mode, and model state.</div>
-                        </div>
-                        <div class="field-control gliner2-status-actions">
-                            <button class="btn btn-field" @click="refreshStatus()" :disabled="statusLoading">
-                                Refresh
-                            </button>
-                            <button class="btn btn-field" @click="loadModel()" :disabled="statusLoading">
-                                Load Model
-                            </button>
-                            <button class="btn" @click="installForCurrentMode()" :disabled="installRunning">
-                                <span x-text="localInstallLabel"></span>
-                            </button>
-                        </div>
-                    </div>
-
-                    <pre class="gliner2-status-block" x-text="statusLoading ? 'Loading status...' : JSON.stringify(status || {}, null, 2)"></pre>
-                </div>
-
-                <div class="gliner2-card">
-                    <div class="section-title">Sample Extraction</div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Task</div>
-                        </div>
-                        <div class="field-control">
-                            <select x-model="testTask" @change="setTask($event.target.value)">
-                                <option value="entities">entities</option>
-                                <option value="classify">classify</option>
-                                <option value="json">json</option>
-                                <option value="relations">relations</option>
-                            </select>
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Text</div>
-                        </div>
-                        <div class="field-control">
-                            <textarea x-model="testText" rows="4"></textarea>
-                        </div>
-                    </div>
-
-                    <div class="field">
-                        <div class="field-label">
-                            <div class="field-title">Schema JSON</div>
-                            <div class="field-description">Examples: `["person","organization"]` or `{"sentiment":["positive","negative"]}`.</div>
-                        </div>
-                        <div class="field-control">
-                            <textarea x-model="testSchemaText" rows="4"></textarea>
-                        </div>
-                    </div>
-
-                    <div class="gliner2-status-actions">
-                        <button class="btn btn-field" @click="runTestExtraction()" :disabled="testRunning">
-                            Run Extraction
+                        <button type="button" class="gl2-button gl2-button-quiet" @click="refreshStatus()" :disabled="statusLoading">
+                            <span class="material-symbols-outlined" aria-hidden="true">refresh</span>
+                            Refresh
                         </button>
                     </div>
 
-                    <pre class="gliner2-status-block" x-text="testRunning ? 'Running extraction...' : (testResult || 'No extraction run yet.')"></pre>
-                </div>
-            </div>
+                    <div class="gl2-instruments">
+                        <template x-for="card in statusCards" :key="card.label">
+                            <article class="gl2-instrument" :class="{ 'is-ok': card.ok }">
+                                <div class="gl2-instrument-label" x-text="card.label"></div>
+                                <div class="gl2-instrument-value" x-text="card.value"></div>
+                                <div class="gl2-instrument-detail" x-text="card.detail"></div>
+                            </article>
+                        </template>
+                    </div>
+
+                    <div class="gl2-notices" x-show="primaryBlockers.length || primaryWarnings.length">
+                        <template x-for="message in primaryBlockers" :key="`blocker-${message}`">
+                            <div class="gl2-notice is-blocker">
+                                <span class="material-symbols-outlined" aria-hidden="true">error</span>
+                                <span x-text="message"></span>
+                            </div>
+                        </template>
+                        <template x-for="message in primaryWarnings" :key="`warning-${message}`">
+                            <div class="gl2-notice is-warning">
+                                <span class="material-symbols-outlined" aria-hidden="true">info</span>
+                                <span x-text="message"></span>
+                            </div>
+                        </template>
+                    </div>
+
+                    <div class="gl2-action-rail">
+                        <button type="button" class="gl2-button" :class="canConnect ? 'gl2-button-primary' : 'gl2-button-secondary'" @click="loadClient()" :disabled="!canConnect">
+                            <span class="material-symbols-outlined" aria-hidden="true">power_settings_new</span>
+                            <span x-text="connectLabel"></span>
+                        </button>
+                        <button type="button" class="gl2-button" :class="installNeedsAttention ? 'gl2-button-primary' : 'gl2-button-secondary'" @click="installForCurrentMode()" :disabled="installRunning">
+                            <span class="material-symbols-outlined" aria-hidden="true">deployed_code_update</span>
+                            <span x-text="installLabel"></span>
+                        </button>
+                    </div>
+                </section>
+
+                <section class="gl2-panel">
+                    <div class="gl2-panel-heading">
+                        <div>
+                            <div class="gl2-kicker">01 / ROUTE</div>
+                            <h2>Choose where inference runs</h2>
+                        </div>
+                        <label class="gl2-master">
+                            <span>Plugin enabled</span>
+                            <span class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_enabled" />
+                                <span class="toggler"></span>
+                            </span>
+                        </label>
+                    </div>
+
+                    <div class="gl2-mode-switch" role="group" aria-label="Inference mode">
+                        <button type="button" :class="{ 'is-active': config.gliner2_mode === 'local' }" @click="setMode('local')">
+                            <span class="material-symbols-outlined" aria-hidden="true">memory</span>
+                            <span>
+                                <strong>Local runtime</strong>
+                                <small>Private · CPU or CUDA</small>
+                            </span>
+                        </button>
+                        <button type="button" :class="{ 'is-active': config.gliner2_mode === 'api' }" @click="setMode('api')">
+                            <span class="material-symbols-outlined" aria-hidden="true">cloud</span>
+                            <span>
+                                <strong>Hosted API</strong>
+                                <small>Lightweight · credentialed</small>
+                            </span>
+                        </button>
+                    </div>
+
+                    <div class="gl2-field-grid" x-show="config.gliner2_mode === 'local'">
+                        <label class="gl2-field gl2-field-wide">
+                            <span>Model checkpoint</span>
+                            <small>Hugging Face id or a compatible local checkpoint.</small>
+                            <input type="text" x-model="config.gliner2_model" />
+                        </label>
+                        <label class="gl2-field">
+                            <span>Device</span>
+                            <small>Auto prefers CUDA when PyTorch can see it.</small>
+                            <select x-model="config.gliner2_device">
+                                <option value="auto">Auto</option>
+                                <option value="cpu">CPU</option>
+                                <option value="cuda">CUDA</option>
+                            </select>
+                        </label>
+                        <div class="gl2-option-stack">
+                            <label class="gl2-option">
+                                <span>
+                                    <strong>FP16 quantization</strong>
+                                    <small>Applied only when CUDA is active.</small>
+                                </span>
+                                <span class="toggle">
+                                    <input type="checkbox" x-model="config.gliner2_quantize" />
+                                    <span class="toggler"></span>
+                                </span>
+                            </label>
+                            <label class="gl2-option">
+                                <span>
+                                    <strong>torch.compile</strong>
+                                    <small>Optional CUDA startup tradeoff for throughput.</small>
+                                </span>
+                                <span class="toggle">
+                                    <input type="checkbox" x-model="config.gliner2_compile" />
+                                    <span class="toggler"></span>
+                                </span>
+                            </label>
+                        </div>
+                    </div>
+
+                    <div class="gl2-field-grid" x-show="config.gliner2_mode === 'api'">
+                        <label class="gl2-field">
+                            <span>API key environment variable</span>
+                            <small>The secret value is never displayed or copied into plugin config.</small>
+                            <input type="text" x-model="config.gliner2_api_key_env" />
+                        </label>
+                        <label class="gl2-field">
+                            <span>Custom API base URL</span>
+                            <small>Leave blank for the GLiNER2 default endpoint.</small>
+                            <input type="url" x-model="config.gliner2_api_base_url" placeholder="Default endpoint" />
+                        </label>
+                        <label class="gl2-field">
+                            <span>Timeout (seconds)</span>
+                            <input type="number" min="1" max="300" step="1" x-model.number="config.gliner2_api_timeout_seconds" />
+                        </label>
+                        <label class="gl2-field">
+                            <span>Retry attempts</span>
+                            <input type="number" min="0" max="10" step="1" x-model.number="config.gliner2_api_max_retries" />
+                        </label>
+                    </div>
+
+                    <div class="gl2-host-note" x-show="config.gliner2_mode === 'local' && status?.in_docker && !status?.torch_cuda_available">
+                        <span class="material-symbols-outlined" aria-hidden="true">developer_board</span>
+                        <span>
+                            CPU mode works now. For CUDA, recreate the Agent Zero container with GPU
+                            passthrough (commonly <code>--gpus all</code>); a running container cannot
+                            grant itself new host-device access.
+                        </span>
+                    </div>
+                </section>
+
+                <section class="gl2-panel">
+                    <div class="gl2-panel-heading">
+                        <div>
+                            <div class="gl2-kicker">02 / AGENT ZERO</div>
+                            <h2>Wire extraction into memory</h2>
+                        </div>
+                    </div>
+
+                    <div class="gl2-option-grid">
+                        <label class="gl2-option">
+                            <span>
+                                <strong>Direct agent tool</strong>
+                                <small>Expose <code>gliner2_extract</code>.</small>
+                            </span>
+                            <span class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_tool_enabled" />
+                                <span class="toggler"></span>
+                            </span>
+                        </label>
+                        <label class="gl2-option">
+                            <span>
+                                <strong>Utility replacement</strong>
+                                <small>Intercept only compatible memory calls.</small>
+                            </span>
+                            <span class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_utility_replacement_enabled" />
+                                <span class="toggler"></span>
+                            </span>
+                        </label>
+                        <label class="gl2-option">
+                            <span>
+                                <strong>Safe Utility fallback</strong>
+                                <small>Use the selected model when extraction cannot decide.</small>
+                            </span>
+                            <span class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_fallback_to_utility_model" />
+                                <span class="toggler"></span>
+                            </span>
+                        </label>
+                        <label class="gl2-option">
+                            <span>
+                                <strong>Usage observability</strong>
+                                <small>Write GLiNER2 replacements to the run log.</small>
+                            </span>
+                            <span class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_usage_logging" />
+                                <span class="toggler"></span>
+                            </span>
+                        </label>
+                        <label class="gl2-option">
+                            <span>
+                                <strong>Memory keywords</strong>
+                                <small>Extract entity-led recall keywords.</small>
+                            </span>
+                            <span class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_memory_keyword_extraction" />
+                                <span class="toggler"></span>
+                            </span>
+                        </label>
+                        <label class="gl2-option">
+                            <span>
+                                <strong>Recall query enrichment</strong>
+                                <small>Build focused recall queries from entities.</small>
+                            </span>
+                            <span class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_recall_query_enrichment" />
+                                <span class="toggler"></span>
+                            </span>
+                        </label>
+                        <label class="gl2-option">
+                            <span>
+                                <strong>Memory relevance filter</strong>
+                                <small>Classify recalled memories before context injection.</small>
+                            </span>
+                            <span class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_memory_post_filter" />
+                                <span class="toggler"></span>
+                            </span>
+                        </label>
+                        <label class="gl2-option">
+                            <span>
+                                <strong>Consolidation triage</strong>
+                                <small>Bypass obvious keep/skip decisions only.</small>
+                            </span>
+                            <span class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_consolidation_triage" />
+                                <span class="toggler"></span>
+                            </span>
+                        </label>
+                        <label class="gl2-option">
+                            <span>
+                                <strong>Knowledge metadata</strong>
+                                <small>Attach extracted entities during import.</small>
+                            </span>
+                            <span class="toggle">
+                                <input type="checkbox" x-model="config.gliner2_knowledge_import_enrichment" />
+                                <span class="toggler"></span>
+                            </span>
+                        </label>
+                    </div>
+
+                    <details class="gl2-details">
+                        <summary>
+                            <span>Advanced memory tuning</span>
+                            <span class="material-symbols-outlined" aria-hidden="true">expand_more</span>
+                        </summary>
+                        <div class="gl2-field-grid gl2-details-body">
+                            <label class="gl2-field">
+                                <span>Entity threshold</span>
+                                <small>Applied to all four extraction task types.</small>
+                                <input type="number" min="0" max="1" step="0.01" x-model.number="config.gliner2_entity_threshold" />
+                            </label>
+                            <label class="gl2-field">
+                                <span>Post-filter threshold</span>
+                                <input type="number" min="0" max="1" step="0.01" x-model.number="config.gliner2_post_filter_threshold" />
+                            </label>
+                            <label class="gl2-field">
+                                <span>Consolidation threshold</span>
+                                <input type="number" min="0" max="1" step="0.01" x-model.number="config.gliner2_consolidation_triage_threshold" />
+                            </label>
+                            <label class="gl2-field gl2-field-wide">
+                                <span>Memory entity types (JSON array or comma list)</span>
+                                <textarea rows="3" x-model="config.gliner2_memory_entity_types"></textarea>
+                            </label>
+                            <label class="gl2-field gl2-field-wide">
+                                <span>Import entity types (JSON array or comma list)</span>
+                                <textarea rows="3" x-model="config.gliner2_import_entity_types"></textarea>
+                            </label>
+                        </div>
+                    </details>
+                </section>
+
+                <section class="gl2-panel">
+                    <div class="gl2-panel-heading">
+                        <div>
+                            <div class="gl2-kicker">03 / GUARDRAILS</div>
+                            <h2>Bound each inference call</h2>
+                        </div>
+                    </div>
+                    <div class="gl2-field-grid gl2-three">
+                        <label class="gl2-field">
+                            <span>Maximum text characters</span>
+                            <small>Hard ceiling: 200,000.</small>
+                            <input type="number" min="1000" max="200000" step="1000" x-model.number="config.gliner2_max_text_chars" />
+                        </label>
+                        <label class="gl2-field">
+                            <span>Maximum schema items</span>
+                            <small>Counts nested labels and fields.</small>
+                            <input type="number" min="1" max="500" step="1" x-model.number="config.gliner2_max_schema_items" />
+                        </label>
+                        <label class="gl2-field">
+                            <span>Model max length</span>
+                            <small>0 uses the checkpoint default.</small>
+                            <input type="number" min="0" max="8192" step="1" x-model.number="config.gliner2_max_len" />
+                        </label>
+                        <label class="gl2-field">
+                            <span>Operation timeout (seconds)</span>
+                            <small>Bounds explicit extraction and Utility replacement waits.</small>
+                            <input type="number" min="1" max="600" step="1" x-model.number="config.gliner2_operation_timeout_seconds" />
+                        </label>
+                    </div>
+                </section>
+
+                <section class="gl2-lab">
+                    <div class="gl2-panel-heading">
+                        <div>
+                            <div class="gl2-kicker">04 / TEST BENCH</div>
+                            <h2>Run one real extraction</h2>
+                        </div>
+                    </div>
+
+                    <div class="gl2-task-tabs" role="tablist" aria-label="Extraction task">
+                        <template x-for="task in ['entities', 'classify', 'json', 'relations']" :key="task">
+                            <button type="button" :class="{ 'is-active': testTask === task }" @click="setTask(task)" x-text="task"></button>
+                        </template>
+                    </div>
+
+                    <div class="gl2-lab-grid">
+                        <div class="gl2-lab-inputs">
+                            <label class="gl2-field">
+                                <span>Source text</span>
+                                <textarea rows="6" x-model="testText"></textarea>
+                            </label>
+                            <label class="gl2-field">
+                                <span>Schema JSON</span>
+                                <textarea rows="6" x-model="testSchemaText"></textarea>
+                            </label>
+                            <button type="button" class="gl2-button gl2-button-primary gl2-run" @click="runTestExtraction()" :disabled="testRunning">
+                                <span class="material-symbols-outlined" aria-hidden="true">play_arrow</span>
+                                <span x-text="testRunning ? 'Extracting…' : 'Run extraction'"></span>
+                            </button>
+                        </div>
+                        <div class="gl2-output">
+                            <div class="gl2-output-head">
+                                <span>RESULT / JSON</span>
+                                <span x-show="testRunning" class="gl2-live">LIVE</span>
+                            </div>
+                            <pre x-text="testRunning ? 'Inference in progress…' : (testResult || 'No run yet. Results appear here without changing saved settings.')"></pre>
+                        </div>
+                    </div>
+                </section>
+
+                <details class="gl2-details gl2-diagnostics">
+                    <summary>
+                        <span>Raw runtime diagnostics</span>
+                        <span class="material-symbols-outlined" aria-hidden="true">expand_more</span>
+                    </summary>
+                    <pre x-text="JSON.stringify(status || {}, null, 2)"></pre>
+                </details>
+            </main>
         </template>
     </div>
 
     <style>
-        .gliner2-config {
+        .gl2-shell {
+            --gl2-ink: var(--color-text, #f3f5f4);
+            --gl2-muted: var(--color-text-secondary, #9da7a2);
+            --gl2-line: color-mix(in srgb, var(--color-border, #59615d) 68%, transparent);
+            --gl2-panel: color-mix(in srgb, var(--color-bg, #161a18) 93%, #8af2bd 7%);
+            --gl2-panel-deep: color-mix(in srgb, var(--color-bg, #111412) 96%, #000 4%);
+            --gl2-mint: #78e3ad;
+            --gl2-mint-deep: #173d2b;
+            --gl2-amber: #f2ba72;
+            --gl2-red: #ff8e86;
+            box-sizing: border-box;
             display: flex;
             flex-direction: column;
-            gap: 16px;
+            gap: 14px;
+            width: 100%;
+            max-width: 100%;
+            min-width: 0;
+            color: var(--gl2-ink);
         }
 
-        .gliner2-card {
-            border: 1px solid var(--color-border);
-            border-radius: 8px;
-            padding: 16px;
+        .gl2-shell *,
+        .gl2-shell *::before,
+        .gl2-shell *::after {
+            box-sizing: border-box;
         }
 
-        .gliner2-status-actions {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
+        .gl2-hero {
+            position: relative;
+            overflow: hidden;
+            min-width: 0;
+            padding: 24px;
+            border: 1px solid var(--gl2-line);
+            border-radius: 14px;
+            background:
+                linear-gradient(120deg, color-mix(in srgb, var(--gl2-mint) 11%, transparent), transparent 58%),
+                repeating-linear-gradient(90deg, transparent 0 39px, color-mix(in srgb, var(--gl2-line) 28%, transparent) 40px),
+                var(--gl2-panel-deep);
         }
 
-        .gliner2-checklist {
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
+        .gl2-hero::after {
+            content: "";
+            position: absolute;
+            top: -70px;
+            right: -60px;
+            width: 190px;
+            height: 190px;
+            border: 1px solid color-mix(in srgb, var(--gl2-mint) 34%, transparent);
+            border-radius: 50%;
+            box-shadow: 0 0 0 18px color-mix(in srgb, var(--gl2-mint) 3%, transparent);
+            pointer-events: none;
         }
 
-        .gliner2-check {
-            border: 1px solid var(--color-border);
-            border-radius: 8px;
-            padding: 10px 12px;
+        .gl2-eyebrow,
+        .gl2-kicker,
+        .gl2-instrument-label,
+        .gl2-output-head,
+        .gl2-state-label {
+            font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+            letter-spacing: 0.09em;
         }
 
-        .gliner2-check.is-ok {
-            background: color-mix(in srgb, var(--color-success, #2e7d32) 6%, transparent);
-        }
-
-        .gliner2-check.is-missing {
-            background: color-mix(in srgb, var(--color-warning, #b26a00) 8%, transparent);
-        }
-
-        .gliner2-check-header {
+        .gl2-eyebrow {
+            position: relative;
+            z-index: 1;
             display: flex;
             align-items: center;
-            gap: 8px;
-            margin-bottom: 4px;
+            gap: 9px;
+            color: var(--gl2-mint);
+            font-size: 0.72rem;
+            font-weight: 700;
         }
 
-        .gliner2-check-dot {
+        .gl2-mark {
+            display: inline-grid;
+            place-items: center;
+            width: 27px;
+            height: 27px;
+            border: 1px solid var(--gl2-mint);
+            border-radius: 7px 2px 7px 2px;
+            background: var(--gl2-mint-deep);
+            color: #b9ffd8;
+            letter-spacing: 0;
+        }
+
+        .gl2-hero h1 {
+            position: relative;
+            z-index: 1;
+            max-width: 660px;
+            margin: 18px 0 8px;
+            font-size: clamp(1.75rem, 4vw, 2.65rem);
+            line-height: 1.02;
+            letter-spacing: -0.045em;
+        }
+
+        .gl2-hero p {
+            position: relative;
+            z-index: 1;
+            max-width: 680px;
+            margin: 0;
+            color: var(--gl2-muted);
+            font-size: 0.96rem;
+            line-height: 1.58;
+        }
+
+        .gl2-privacy {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            max-width: 680px;
+            margin-top: 18px;
+            padding-top: 14px;
+            border-top: 1px solid var(--gl2-line);
+            color: color-mix(in srgb, var(--gl2-ink) 82%, var(--gl2-muted));
+            font-size: 0.82rem;
+            line-height: 1.45;
+        }
+
+        .gl2-privacy .material-symbols-outlined {
+            color: var(--gl2-mint);
+            font-size: 18px;
+        }
+
+        .gl2-console,
+        .gl2-panel,
+        .gl2-lab,
+        .gl2-details {
+            min-width: 0;
+            border: 1px solid var(--gl2-line);
+            border-radius: 14px;
+            background: var(--gl2-panel);
+        }
+
+        .gl2-console {
+            padding: 16px;
+            border-left: 3px solid var(--gl2-amber);
+        }
+
+        .gl2-console[data-tone="ready"] {
+            border-left-color: var(--gl2-mint);
+        }
+
+        .gl2-console[data-tone="blocked"] {
+            border-left-color: var(--gl2-red);
+        }
+
+        .gl2-console[data-tone="failed"] {
+            border-left-color: var(--gl2-red);
+        }
+
+        .gl2-console-head,
+        .gl2-panel-heading,
+        .gl2-action-rail {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 14px;
+            min-width: 0;
+        }
+
+        .gl2-state-copy {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            min-width: 0;
+        }
+
+        .gl2-state-dot {
+            flex: 0 0 auto;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: var(--gl2-amber);
+            box-shadow: 0 0 0 5px color-mix(in srgb, var(--gl2-amber) 12%, transparent);
+        }
+
+        [data-tone="ready"] .gl2-state-dot {
+            background: var(--gl2-mint);
+            box-shadow: 0 0 0 5px color-mix(in srgb, var(--gl2-mint) 12%, transparent);
+        }
+
+        [data-tone="blocked"] .gl2-state-dot {
+            background: var(--gl2-red);
+            box-shadow: 0 0 0 5px color-mix(in srgb, var(--gl2-red) 12%, transparent);
+        }
+
+        [data-tone="failed"] .gl2-state-dot {
+            background: var(--gl2-red);
+            box-shadow: 0 0 0 5px color-mix(in srgb, var(--gl2-red) 12%, transparent);
+        }
+
+        .gl2-state-label {
+            font-size: 0.76rem;
+            font-weight: 800;
+        }
+
+        .gl2-state-detail {
+            margin-top: 3px;
+            color: var(--gl2-muted);
+            font-size: 0.82rem;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+
+        .gl2-instruments {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: 8px;
+            margin-top: 14px;
+        }
+
+        .gl2-instrument {
+            min-width: 0;
+            padding: 12px;
+            border: 1px solid var(--gl2-line);
+            border-radius: 9px;
+            background: var(--gl2-panel-deep);
+        }
+
+        .gl2-instrument.is-ok {
+            border-color: color-mix(in srgb, var(--gl2-mint) 35%, var(--gl2-line));
+        }
+
+        .gl2-instrument-label {
+            color: var(--gl2-muted);
+            font-size: 0.65rem;
+            font-weight: 700;
+        }
+
+        .gl2-instrument-value {
+            margin-top: 7px;
+            font-size: 0.98rem;
+            font-weight: 750;
+            overflow-wrap: anywhere;
+        }
+
+        .gl2-instrument-detail {
+            margin-top: 4px;
+            color: var(--gl2-muted);
+            font-size: 0.72rem;
+            line-height: 1.35;
+            overflow-wrap: anywhere;
+        }
+
+        .gl2-notices {
+            display: grid;
+            gap: 6px;
+            margin-top: 10px;
+        }
+
+        .gl2-notice {
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            min-width: 0;
+            padding: 9px 10px;
+            border-radius: 8px;
+            font-size: 0.8rem;
+            line-height: 1.4;
+            overflow-wrap: anywhere;
+        }
+
+        .gl2-notice.is-blocker {
+            background: color-mix(in srgb, var(--gl2-red) 11%, transparent);
+            color: color-mix(in srgb, var(--gl2-red) 65%, var(--gl2-ink));
+        }
+
+        .gl2-notice.is-warning {
+            background: color-mix(in srgb, var(--gl2-amber) 10%, transparent);
+            color: color-mix(in srgb, var(--gl2-amber) 60%, var(--gl2-ink));
+        }
+
+        .gl2-notice .material-symbols-outlined {
+            flex: 0 0 auto;
+            font-size: 18px;
+        }
+
+        .gl2-action-rail {
+            justify-content: flex-start;
+            flex-wrap: wrap;
+            margin-top: 12px;
+        }
+
+        .gl2-button {
+            appearance: none;
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            min-width: 34px;
-            height: 22px;
-            border-radius: 999px;
+            gap: 7px;
+            min-height: 38px;
+            max-width: 100%;
+            padding: 8px 13px;
+            border: 1px solid transparent;
+            border-radius: 8px;
+            background: transparent;
+            color: var(--gl2-ink);
+            font: inherit;
+            font-size: 0.82rem;
+            font-weight: 720;
+            line-height: 1.2;
+            text-align: center;
+            cursor: pointer;
+            transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+        }
+
+        .gl2-button:hover:not(:disabled) {
+            transform: translateY(-1px);
+        }
+
+        .gl2-button:focus-visible,
+        .gl2-mode-switch button:focus-visible,
+        .gl2-task-tabs button:focus-visible {
+            outline: 2px solid var(--gl2-mint);
+            outline-offset: 2px;
+        }
+
+        .gl2-button:disabled {
+            opacity: 0.48;
+            cursor: not-allowed;
+        }
+
+        .gl2-button .material-symbols-outlined {
+            font-size: 18px;
+        }
+
+        .gl2-button-primary {
+            border-color: var(--gl2-mint);
+            background: var(--gl2-mint);
+            color: #10251a;
+        }
+
+        .gl2-button-secondary {
+            border-color: color-mix(in srgb, var(--gl2-mint) 44%, var(--gl2-line));
+            background: color-mix(in srgb, var(--gl2-mint) 8%, transparent);
+        }
+
+        .gl2-button-quiet {
+            flex: 0 0 auto;
+            min-height: 34px;
+            border-color: var(--gl2-line);
+            background: var(--gl2-panel-deep);
+        }
+
+        .gl2-panel,
+        .gl2-lab {
+            padding: 19px;
+        }
+
+        .gl2-panel-heading {
+            align-items: flex-start;
+            margin-bottom: 16px;
+        }
+
+        .gl2-kicker {
+            color: var(--gl2-mint);
+            font-size: 0.66rem;
+            font-weight: 800;
+        }
+
+        .gl2-panel h2,
+        .gl2-lab h2 {
+            margin: 5px 0 0;
+            font-size: 1.12rem;
+            letter-spacing: -0.02em;
+        }
+
+        .gl2-master {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            color: var(--gl2-muted);
+            font-size: 0.8rem;
+        }
+
+        .gl2-mode-switch {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 9px;
+            margin-bottom: 16px;
+        }
+
+        .gl2-mode-switch button {
+            appearance: none;
+            display: flex;
+            align-items: center;
+            gap: 11px;
+            min-width: 0;
+            min-height: 72px;
+            padding: 12px;
+            border: 1px solid var(--gl2-line);
+            border-radius: 10px;
+            background: var(--gl2-panel-deep);
+            color: var(--gl2-ink);
+            text-align: left;
+            cursor: pointer;
+        }
+
+        .gl2-mode-switch button.is-active {
+            border-color: var(--gl2-mint);
+            background: color-mix(in srgb, var(--gl2-mint) 9%, var(--gl2-panel-deep));
+            box-shadow: inset 3px 0 0 var(--gl2-mint);
+        }
+
+        .gl2-mode-switch .material-symbols-outlined {
+            flex: 0 0 auto;
+            color: var(--gl2-mint);
+            font-size: 25px;
+        }
+
+        .gl2-mode-switch strong,
+        .gl2-mode-switch small {
+            display: block;
+            overflow-wrap: anywhere;
+        }
+
+        .gl2-mode-switch strong {
+            font-size: 0.87rem;
+        }
+
+        .gl2-mode-switch small {
+            margin-top: 4px;
+            color: var(--gl2-muted);
             font-size: 0.72rem;
-            font-weight: 700;
-            background: rgba(0, 0, 0, 0.12);
         }
 
-        .gliner2-check-label {
-            font-weight: 600;
+        .gl2-field-grid {
+            display: grid;
+            grid-template-columns: repeat(2, minmax(0, 1fr));
+            gap: 12px;
+            min-width: 0;
         }
 
-        .gliner2-check-detail {
-            color: var(--color-text-secondary);
+        .gl2-field-grid.gl2-three {
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+        }
+
+        .gl2-field,
+        .gl2-option-stack {
+            min-width: 0;
+        }
+
+        .gl2-field {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .gl2-field-wide {
+            grid-column: 1 / -1;
+        }
+
+        .gl2-field > span {
+            font-size: 0.8rem;
+            font-weight: 720;
+        }
+
+        .gl2-field > small,
+        .gl2-option small {
+            color: var(--gl2-muted);
+            font-size: 0.72rem;
+            line-height: 1.4;
+        }
+
+        .gl2-field input,
+        .gl2-field select,
+        .gl2-field textarea {
+            width: 100%;
+            max-width: 100%;
+            min-width: 0;
+            border: 1px solid var(--gl2-line);
+            border-radius: 8px;
+            background: var(--gl2-panel-deep);
+            color: var(--gl2-ink);
+        }
+
+        .gl2-field input,
+        .gl2-field select {
+            min-height: 39px;
+            padding: 8px 10px;
+        }
+
+        .gl2-field textarea {
+            min-height: 88px;
+            padding: 10px;
+            resize: vertical;
+            font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+            font-size: 0.78rem;
             line-height: 1.45;
         }
 
-        .gliner2-steps {
-            margin: 0 0 10px 1.15rem;
-            padding: 0;
-            display: flex;
-            flex-direction: column;
+        .gl2-field input:focus,
+        .gl2-field select:focus,
+        .gl2-field textarea:focus {
+            border-color: var(--gl2-mint);
+            outline: none;
+            box-shadow: 0 0 0 2px color-mix(in srgb, var(--gl2-mint) 13%, transparent);
+        }
+
+        .gl2-option-stack,
+        .gl2-option-grid {
+            display: grid;
             gap: 8px;
         }
 
-        .gliner2-steps li {
-            line-height: 1.45;
+        .gl2-option-grid {
+            grid-template-columns: repeat(2, minmax(0, 1fr));
         }
 
-        .gliner2-inline-label {
-            font-weight: 600;
+        .gl2-option {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            min-width: 0;
+            padding: 11px 12px;
+            border: 1px solid var(--gl2-line);
+            border-radius: 9px;
+            background: var(--gl2-panel-deep);
         }
 
-        .gliner2-host-note {
-            margin-top: 12px;
+        .gl2-option > span:first-child {
+            min-width: 0;
+        }
+
+        .gl2-option strong,
+        .gl2-option small {
+            display: block;
+            overflow-wrap: anywhere;
+        }
+
+        .gl2-option strong {
+            font-size: 0.8rem;
+        }
+
+        .gl2-option small {
+            margin-top: 3px;
+        }
+
+        .gl2-host-note {
+            display: flex;
+            align-items: flex-start;
+            gap: 9px;
+            margin-top: 13px;
             padding: 10px 12px;
-            border-radius: 8px;
+            border: 1px solid color-mix(in srgb, var(--gl2-amber) 30%, var(--gl2-line));
+            border-radius: 9px;
+            background: color-mix(in srgb, var(--gl2-amber) 7%, transparent);
+            color: color-mix(in srgb, var(--gl2-ink) 88%, var(--gl2-amber));
+            font-size: 0.78rem;
             line-height: 1.45;
+            overflow-wrap: anywhere;
         }
 
-        .gliner2-host-note.is-warning {
-            background: color-mix(in srgb, var(--color-warning, #b26a00) 10%, transparent);
+        .gl2-host-note .material-symbols-outlined {
+            flex: 0 0 auto;
+            color: var(--gl2-amber);
+            font-size: 20px;
         }
 
-        .gliner2-host-note.is-ok-note {
-            background: color-mix(in srgb, var(--color-success, #2e7d32) 8%, transparent);
+        .gl2-shell code {
+            padding: 1px 4px;
+            border-radius: 4px;
+            background: color-mix(in srgb, var(--gl2-mint) 9%, transparent);
+            color: color-mix(in srgb, var(--gl2-mint) 82%, white);
+            font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+            font-size: 0.92em;
+            overflow-wrap: anywhere;
         }
 
-        .gliner2-status-block {
+        .gl2-details {
+            overflow: hidden;
+            margin-top: 13px;
+            background: var(--gl2-panel-deep);
+        }
+
+        .gl2-details summary {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 12px 13px;
+            font-size: 0.8rem;
+            font-weight: 720;
+            cursor: pointer;
+            list-style: none;
+        }
+
+        .gl2-details summary::-webkit-details-marker {
+            display: none;
+        }
+
+        .gl2-details summary .material-symbols-outlined {
+            font-size: 19px;
+            transition: transform 140ms ease;
+        }
+
+        .gl2-details[open] summary .material-symbols-outlined {
+            transform: rotate(180deg);
+        }
+
+        .gl2-details-body {
+            padding: 0 13px 13px;
+        }
+
+        .gl2-task-tabs {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 12px;
+        }
+
+        .gl2-task-tabs button {
+            appearance: none;
+            padding: 7px 10px;
+            border: 1px solid var(--gl2-line);
+            border-radius: 999px;
+            background: var(--gl2-panel-deep);
+            color: var(--gl2-muted);
+            font: inherit;
+            font-size: 0.72rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            cursor: pointer;
+        }
+
+        .gl2-task-tabs button.is-active {
+            border-color: var(--gl2-mint);
+            background: var(--gl2-mint-deep);
+            color: #b9ffd8;
+        }
+
+        .gl2-lab-grid {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+            gap: 12px;
+            min-width: 0;
+        }
+
+        .gl2-lab-inputs {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            min-width: 0;
+        }
+
+        .gl2-run {
+            align-self: flex-start;
+        }
+
+        .gl2-output {
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+            min-height: 330px;
+            overflow: hidden;
+            border: 1px solid var(--gl2-line);
+            border-radius: 9px;
+            background: #0d100f;
+        }
+
+        .gl2-output-head {
+            display: flex;
+            justify-content: space-between;
+            gap: 10px;
+            padding: 9px 11px;
+            border-bottom: 1px solid var(--gl2-line);
+            color: #7f9188;
+            font-size: 0.64rem;
+            font-weight: 700;
+        }
+
+        .gl2-live {
+            color: var(--gl2-mint);
+        }
+
+        .gl2-output pre,
+        .gl2-diagnostics pre {
+            width: 100%;
+            max-width: 100%;
+            min-width: 0;
             margin: 0;
-            padding: 12px;
-            border-radius: 8px;
-            background: var(--color-bg-soft, rgba(0, 0, 0, 0.04));
             overflow: auto;
             white-space: pre-wrap;
+            overflow-wrap: anywhere;
             word-break: break-word;
+            color: #c4d4cc;
+            font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace;
+            font-size: 0.74rem;
+            line-height: 1.5;
         }
 
-        textarea {
-            width: 100%;
-            min-height: 96px;
+        .gl2-output pre {
+            flex: 1;
+            padding: 12px;
+        }
+
+        .gl2-diagnostics {
+            margin-top: 0;
+        }
+
+        .gl2-diagnostics pre {
+            max-height: 320px;
+            padding: 0 13px 13px;
+        }
+
+        @media (max-width: 760px) {
+            .gl2-instruments,
+            .gl2-field-grid.gl2-three {
+                grid-template-columns: repeat(2, minmax(0, 1fr));
+            }
+
+            .gl2-lab-grid {
+                grid-template-columns: minmax(0, 1fr);
+            }
+        }
+
+        @media (max-width: 560px) {
+            .gl2-hero,
+            .gl2-panel,
+            .gl2-lab {
+                padding: 15px;
+            }
+
+            .gl2-console-head,
+            .gl2-panel-heading {
+                align-items: stretch;
+                flex-direction: column;
+            }
+
+            .gl2-button-quiet,
+            .gl2-master {
+                align-self: flex-start;
+            }
+
+            .gl2-instruments,
+            .gl2-mode-switch,
+            .gl2-field-grid,
+            .gl2-field-grid.gl2-three,
+            .gl2-option-grid {
+                grid-template-columns: minmax(0, 1fr);
+            }
+
+            .gl2-action-rail .gl2-button {
+                width: 100%;
+            }
         }
     </style>
 </body>

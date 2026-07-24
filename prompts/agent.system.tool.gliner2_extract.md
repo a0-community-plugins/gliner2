@@ -1,7 +1,9 @@
 ### gliner2_extract
 schema-driven information extraction with GLiNER2
 
-use when the task needs fast extraction from provided text without a general LLM round trip.
+use when the task needs typed extraction from provided text without a general
+LLM round trip. do not use it for open-ended writing, summarization, or facts
+that are not present in the source text.
 
 args:
 - `task`: one of `entities`, `classify`, `json`, `relations`
@@ -14,6 +16,12 @@ defaults:
 - `entities` can omit `schema` to use the configured memory entity types
 - `classify` and `json` require an object schema
 - `relations` accepts an array or object schema
+- confidence threshold, maximum text size, schema size, and model length come from plugin settings
+
+result:
+- returns JSON from the configured local model or hosted API
+- an error explains missing runtime, credential, device, schema, or size requirements
+- API mode sends the supplied text and schema to the configured endpoint
 
 example:
 ~~~json
